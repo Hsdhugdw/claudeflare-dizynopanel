@@ -2,7 +2,7 @@
 
 این نسخه از پروژه **«پنل دیزاینو وی پی ان»** به صورت کاملاً مستقل برای استقرار رایگان، فوق‌العاده سریع و بدون نیاز به VPS روی پلتفرم **Cloudflare Workers** پیاده‌سازی شده است.
 
-[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/YOUR_USERNAME/YOUR_CLOUDFLARE_REPO)
+[![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Hsdhugdw/claudeflare-dizynopanel)
 ![Cloudflare Workers](https://img.shields.io/badge/Platform-Cloudflare_Workers-f38020?style=for-the-badge&logo=cloudflare)
 ![VLESS over WS](https://img.shields.io/badge/Protocol-VLESS_over_WebSocket-38bdf8?style=for-the-badge)
 ![Zero Cost](https://img.shields.io/badge/Cost-100%25_Free-34d399?style=for-the-badge)
