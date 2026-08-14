@@ -1,7 +1,7 @@
 /**
  * ورکر اختصاصی «دیزاینو وی پی ان» (Dizyno VPN Panel - Cloudflare Workers Edition)
- * پشتیبانی کامل از VLESS over WebSocket، داشبورد مدیریت فوق‌العاده شیک با تم تیره/روشن،
- * راه‌اندازی اولیه، مودال ساخت کاربر، اسکنر آی‌پی تمیز، ربات تلگرام و سیستم سابسکریپشن هوشمند.
+ * شامل VLESS over WebSocket، داشبورد کامل مدیریت، راه‌اندازی اولیه، مودال ساخت کاربر،
+ * مودال تنظیمات کامل (تغییر رمز، آی‌پی تمیز، ربات تلگرام) و سیستم سابسکریپشن هوشمند.
  */
 
 import { connect } from 'cloudflare:sockets';
@@ -16,50 +16,60 @@ const DEFAULT_SETTINGS = {
   telegramAdminId: ''
 };
 
-// حافظه موقت درون برنامه (در صورت عدم اتصال اولیه KV)
-let memoryStore = {
+// حافظه ماندگار جهانی درون‌برنامه
+let globalMemoryStore = {
   settings: { ...DEFAULT_SETTINGS },
   users: []
 };
 
+// دریافت دیتابیس فعال KV
+function getKvBinding(env) {
+  if (!env) return null;
+  return env.DIZYNO_KV || env.USERS_KV || env.KV || null;
+}
+
 // دریافت تنظیمات
 async function getSettings(env) {
-  if (env && env.DIZYNO_KV) {
+  const kv = getKvBinding(env);
+  if (kv) {
     try {
-      const data = await env.DIZYNO_KV.get('settings', 'json');
+      const data = await kv.get('settings', 'json');
       if (data) return { ...DEFAULT_SETTINGS, ...data };
     } catch (e) {}
   }
-  return memoryStore.settings;
+  return globalMemoryStore.settings;
 }
 
 // ذخیره تنظیمات
 async function saveSettings(env, settings) {
-  memoryStore.settings = settings;
-  if (env && env.DIZYNO_KV) {
+  globalMemoryStore.settings = settings;
+  const kv = getKvBinding(env);
+  if (kv) {
     try {
-      await env.DIZYNO_KV.put('settings', JSON.stringify(settings));
+      await kv.put('settings', JSON.stringify(settings));
     } catch (e) {}
   }
 }
 
 // دریافت کاربران
 async function getUsers(env) {
-  if (env && env.DIZYNO_KV) {
+  const kv = getKvBinding(env);
+  if (kv) {
     try {
-      const data = await env.DIZYNO_KV.get('users', 'json');
-      if (data) return data;
+      const data = await kv.get('users', 'json');
+      if (Array.isArray(data) && data.length > 0) return data;
     } catch (e) {}
   }
-  return memoryStore.users;
+  return globalMemoryStore.users;
 }
 
 // ذخیره کاربران
 async function saveUsers(env, users) {
-  memoryStore.users = users;
-  if (env && env.DIZYNO_KV) {
+  globalMemoryStore.users = users;
+  const kv = getKvBinding(env);
+  if (kv) {
     try {
-      await env.DIZYNO_KV.put('users', JSON.stringify(users));
+      await kv.put('users', JSON.stringify(users));
     } catch (e) {}
   }
 }
@@ -89,7 +99,8 @@ export default {
     if (path === '/api/setup-status') {
       const settings = await getSettings(env);
       const users = await getUsers(env);
-      return jsonResponse({ success: true, isConfigured: !!settings.isConfigured, hasUsers: users.length > 0 });
+      const kvBound = !!getKvBinding(env);
+      return jsonResponse({ success: true, isConfigured: !!settings.isConfigured, hasUsers: users.length > 0, kvBound });
     }
 
     // API راه‌اندازی اولیه
@@ -139,6 +150,8 @@ export default {
       if (body.username) settings.username = body.username.trim();
       if (body.password) settings.password = body.password.trim();
       if (body.cleanIp !== undefined) settings.cleanIp = body.cleanIp.trim();
+      if (body.telegramBotToken !== undefined) settings.telegramBotToken = body.telegramBotToken.trim();
+      if (body.telegramAdminId !== undefined) settings.telegramAdminId = body.telegramAdminId.trim();
 
       await saveSettings(env, settings);
       return jsonResponse({ success: true, message: 'تنظیمات با موفقیت به‌روزرسانی شد.' });
@@ -166,10 +179,11 @@ export default {
         expireDate = d.toISOString().split('T')[0];
       }
 
+      const newUuid = crypto.randomUUID();
       const newUser = {
-        id: crypto.randomUUID(),
+        id: newUuid,
+        uuid: newUuid,
         name: body.name.trim(),
-        uuid: crypto.randomUUID(),
         limitBytes: body.limitGB ? parseFloat(body.limitGB) * 1024 * 1024 * 1024 : 0,
         usedBytes: 0,
         expireDate: expireDate,
@@ -182,11 +196,10 @@ export default {
       return jsonResponse({ success: true, message: 'کاربر جدید با موفقیت ایجاد شد.', user: newUser });
     }
 
-    // API ویرایش/حذف کاربر
+    // API حذف کاربر
     if (path.startsWith('/api/users/')) {
       const parts = path.split('/');
       const userId = parts[3];
-      const action = parts[4];
       const users = await getUsers(env);
       const index = users.findIndex(u => u.id === userId || u.uuid === userId);
 
@@ -197,23 +210,6 @@ export default {
         await saveUsers(env, users);
         return jsonResponse({ success: true, message: 'کاربر حذف شد.' });
       }
-
-      if (action === 'reset-traffic' && request.method === 'POST') {
-        users[index].usedBytes = 0;
-        await saveUsers(env, users);
-        return jsonResponse({ success: true, message: 'ترافیک کاربر صفر شد.' });
-      }
-
-      if (request.method === 'PUT') {
-        const body = await request.json();
-        if (body.name) users[index].name = body.name.trim();
-        if (body.limitGB !== undefined) users[index].limitBytes = parseFloat(body.limitGB) * 1024 * 1024 * 1024;
-        if (body.expireDate !== undefined) users[index].expireDate = body.expireDate;
-        if (body.status) users[index].status = body.status;
-
-        await saveUsers(env, users);
-        return jsonResponse({ success: true, message: 'اطلاعات کاربر ویرایش شد.' });
-      }
     }
 
     // API لیست آی‌پی‌های تمیز
@@ -223,12 +219,12 @@ export default {
     }
 
     // مسیر سابسکریپشن هوشمند (/sub/:uuid)
-    if (path.startsWith('/sub/')) {
+    if (path.includes('/sub/')) {
       const rawUuid = path.split('/sub/')[1] || '';
       const cleanUuid = rawUuid.split('/')[0].split('?')[0].trim().toLowerCase();
 
       const users = await getUsers(env);
-      const user = users.find(u => u.uuid.toLowerCase() === cleanUuid || u.id === cleanUuid);
+      const user = users.find(u => (u.uuid && u.uuid.toLowerCase() === cleanUuid) || u.id === cleanUuid);
 
       if (!user) {
         return new Response('User Not Found / کاربر یافت نشد', { status: 404 });
@@ -494,6 +490,9 @@ function renderDashboardHtml() {
         <button class="btn btn-sm btn-outline-info rounded-3" data-bs-toggle="modal" data-bs-target="#cleanIpModal">
           <i class="fa-solid fa-network-wired me-1"></i> آی‌پی تمیز
         </button>
+        <button class="btn btn-sm btn-outline-light rounded-3" data-bs-toggle="modal" data-bs-target="#settingsModal" title="تنظیمات سیستم">
+          <i class="fa-solid fa-gear"></i> تنظیمات
+        </button>
         <button class="btn btn-sm btn-outline-danger rounded-3" onclick="location.reload()">
           <i class="fa-solid fa-power-off"></i>
         </button>
@@ -501,6 +500,10 @@ function renderDashboardHtml() {
     </nav>
 
     <div class="container-fluid px-3 px-md-5">
+      <div id="kvWarning" class="alert alert-warning rounded-4 mb-4 d-none">
+        <i class="fa-solid fa-triangle-exclamation me-2"></i> <strong>هشدار دیتابیس KV:</strong> دیتابیس `DIZYNO_KV` متصل نشده است. برای ذخیره دائمی کاربران در کلودفلر، به زبانه Settings -> Variables & Bindings بروید و یک KV Binding به نام `DIZYNO_KV` بسازید.
+      </div>
+
       <div class="card-dark mb-4">
         <div class="d-flex justify-content-between align-items-center flex-wrap gap-3 mb-4">
           <h5 class="fw-bold mb-0"><i class="fa-solid fa-users text-primary me-2"></i> لیست کاربران</h5>
@@ -560,6 +563,46 @@ function renderDashboardHtml() {
     </div>
   </div>
 
+  <!-- مودال تنظیمات کامل سیستم -->
+  <div class="modal fade" id="settingsModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content modal-content-dark">
+        <div class="modal-header border-secondary border-opacity-25">
+          <h5 class="modal-title fw-bold"><i class="fa-solid fa-gear text-warning me-2"></i> تنظیمات سیستم</h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+        </div>
+        <form id="settingsForm">
+          <div class="modal-body">
+            <div class="mb-3">
+              <label class="form-label small text-muted">نام کاربری ادمین</label>
+              <input type="text" id="settingsUsername" class="form-control form-control-dark" required>
+            </div>
+            <div class="mb-3">
+              <label class="form-label small text-muted">کلمه عبور ادمین</label>
+              <input type="password" id="settingsPassword" class="form-control form-control-dark" placeholder="رمز جدید یا قبلی" required>
+            </div>
+            <div class="mb-3">
+              <label class="form-label small text-muted">آی‌پی یا دامنه تمیز اتصال</label>
+              <input type="text" id="settingsCleanIp" class="form-control form-control-dark" placeholder="مثال: 162.159.192.1">
+            </div>
+            <div class="mb-3">
+              <label class="form-label small text-muted">توکن ربات تلگرام (BotFather Token)</label>
+              <input type="text" id="settingsBotToken" class="form-control form-control-dark" placeholder="اختیاری">
+            </div>
+            <div class="mb-3">
+              <label class="form-label small text-muted">Chat ID ادمین در تلگرام</label>
+              <input type="text" id="settingsAdminId" class="form-control form-control-dark" placeholder="اختیاری">
+            </div>
+          </div>
+          <div class="modal-footer border-secondary border-opacity-25">
+            <button type="button" class="btn btn-outline-secondary rounded-3" data-bs-dismiss="modal">انصراف</button>
+            <button type="submit" class="btn btn-primary rounded-3 px-4 fw-bold">ذخیره تنظیمات</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
   <!-- مودال اسکنر آی‌پی تمیز -->
   <div class="modal fade" id="cleanIpModal" tabindex="-1">
     <div class="modal-dialog modal-dialog-centered">
@@ -584,6 +627,9 @@ function renderDashboardHtml() {
     async function init() {
       const res = await fetch('/api/setup-status');
       const data = await res.json();
+      if (!data.kvBound) {
+        document.getElementById('kvWarning')?.classList.remove('d-none');
+      }
       if (!data.isConfigured) {
         document.getElementById('setupView').classList.remove('d-none');
       } else {
@@ -641,11 +687,45 @@ function renderDashboardHtml() {
       }
     });
 
+    document.getElementById('settingsForm')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const username = document.getElementById('settingsUsername').value;
+      const password = document.getElementById('settingsPassword').value;
+      const cleanIp = document.getElementById('settingsCleanIp').value;
+      const telegramBotToken = document.getElementById('settingsBotToken').value;
+      const telegramAdminId = document.getElementById('settingsAdminId').value;
+
+      const res = await fetch('/api/settings', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ username, password, cleanIp, telegramBotToken, telegramAdminId })
+      });
+      const data = await res.json();
+      if (data.success) {
+        alert('تنظیمات ذخیره شد.');
+        bootstrap.Modal.getInstance(document.getElementById('settingsModal')).hide();
+      }
+    });
+
     async function showDash() {
       document.getElementById('setupView').classList.add('d-none');
       document.getElementById('loginView').classList.add('d-none');
       document.getElementById('dashView').classList.remove('d-none');
+      loadSettings();
       loadUsers();
+    }
+
+    async function loadSettings() {
+      const res = await fetch('/api/settings');
+      const data = await res.json();
+      if (data.settings) {
+        document.getElementById('settingsUsername').value = data.settings.username || '';
+        document.getElementById('settingsPassword').value = data.settings.password || '';
+        document.getElementById('settingsCleanIp').value = data.settings.cleanIp || '';
+        document.getElementById('settingsBotToken').value = data.settings.telegramBotToken || '';
+        document.getElementById('settingsAdminId').value = data.settings.telegramAdminId || '';
+        document.getElementById('cleanIpInput').value = data.settings.cleanIp || '';
+      }
     }
 
     async function loadUsers() {
@@ -653,6 +733,11 @@ function renderDashboardHtml() {
       const data = await res.json();
       const tbody = document.getElementById('userTable');
       tbody.innerHTML = '';
+      if (!data.users || data.users.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted py-4">هیچ کاربری یافت نشد. دکمه ساخت کاربر جدید را بزنید.</td></tr>';
+        return;
+      }
+
       data.users.forEach((u, i) => {
         const subUrl = location.origin + '/sub/' + u.uuid;
         const htmlSubUrl = subUrl + '?html=true';
