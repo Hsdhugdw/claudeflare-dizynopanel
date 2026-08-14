@@ -2,11 +2,3 @@ name = "dizyno-vpn"
 main = "worker.js"
 compatibility_date = "2024-01-01"
 compatibility_flags = ["nodejs_compat"]
-
-[site]
-bucket = ""
-
-# تنظیمات دیتابیس کلودفلر KV (در صورت ایجاد KV)
-kv_namespaces = [
-  { binding = "DIZYNO_KV", id = "dizyno_kv_id_placeholder" }
-]
