@@ -1,6 +1,7 @@
 /**
  * ورکر اختصاصی «دیزاینو وی پی ان» (Dizyno VPN Panel - Cloudflare Workers Edition)
- * پشتیبانی از VLESS over WebSocket، داشبورد مدیریت، راه‌اندازی اولیه، آی‌پی تمیز و ربات تلگرام
+ * پشتیبانی کامل از VLESS over WebSocket، داشبورد مدیریت فوق‌العاده شیک با تم تیره/روشن،
+ * راه‌اندازی اولیه، مودال ساخت کاربر، اسکنر آی‌پی تمیز، ربات تلگرام و سیستم سابسکریپشن هوشمند.
  */
 
 import { connect } from 'cloudflare:sockets';
@@ -15,7 +16,7 @@ const DEFAULT_SETTINGS = {
   telegramAdminId: ''
 };
 
-// حافظه موقت درون برنامه (در صورت عدم اتصال KV)
+// حافظه موقت درون برنامه (در صورت عدم اتصال اولیه KV)
 let memoryStore = {
   settings: { ...DEFAULT_SETTINGS },
   users: []
@@ -24,8 +25,10 @@ let memoryStore = {
 // دریافت تنظیمات
 async function getSettings(env) {
   if (env && env.DIZYNO_KV) {
-    const data = await env.DIZYNO_KV.get('settings', 'json');
-    if (data) return { ...DEFAULT_SETTINGS, ...data };
+    try {
+      const data = await env.DIZYNO_KV.get('settings', 'json');
+      if (data) return { ...DEFAULT_SETTINGS, ...data };
+    } catch (e) {}
   }
   return memoryStore.settings;
 }
@@ -34,15 +37,19 @@ async function getSettings(env) {
 async function saveSettings(env, settings) {
   memoryStore.settings = settings;
   if (env && env.DIZYNO_KV) {
-    await env.DIZYNO_KV.put('settings', JSON.stringify(settings));
+    try {
+      await env.DIZYNO_KV.put('settings', JSON.stringify(settings));
+    } catch (e) {}
   }
 }
 
 // دریافت کاربران
 async function getUsers(env) {
   if (env && env.DIZYNO_KV) {
-    const data = await env.DIZYNO_KV.get('users', 'json');
-    if (data) return data;
+    try {
+      const data = await env.DIZYNO_KV.get('users', 'json');
+      if (data) return data;
+    } catch (e) {}
   }
   return memoryStore.users;
 }
@@ -51,7 +58,9 @@ async function getUsers(env) {
 async function saveUsers(env, users) {
   memoryStore.users = users;
   if (env && env.DIZYNO_KV) {
-    await env.DIZYNO_KV.put('users', JSON.stringify(users));
+    try {
+      await env.DIZYNO_KV.put('users', JSON.stringify(users));
+    } catch (e) {}
   }
 }
 
@@ -102,7 +111,7 @@ export default {
       settings.isConfigured = true;
 
       await saveSettings(env, settings);
-      return jsonResponse({ success: true, message: 'راه‌اندازی اولیه ورکر دیزاینو انجام شد.' });
+      return jsonResponse({ success: true, message: 'راه‌اندازی اولیه انجام شد.' });
     }
 
     // API ورود
@@ -116,10 +125,23 @@ export default {
       return jsonResponse({ success: false, message: 'اطلاعات ورود اشتباه است.' }, 400);
     }
 
-    // API بررسی ورود
-    if (path === '/api/check-auth') {
+    // API دریافت تنظیمات
+    if (path === '/api/settings') {
       const settings = await getSettings(env);
-      return jsonResponse({ success: true, username: settings.username, settings });
+      return jsonResponse({ success: true, settings });
+    }
+
+    // API تغییر تنظیمات
+    if (path === '/api/settings' && request.method === 'POST') {
+      const body = await request.json();
+      const settings = await getSettings(env);
+
+      if (body.username) settings.username = body.username.trim();
+      if (body.password) settings.password = body.password.trim();
+      if (body.cleanIp !== undefined) settings.cleanIp = body.cleanIp.trim();
+
+      await saveSettings(env, settings);
+      return jsonResponse({ success: true, message: 'تنظیمات با موفقیت به‌روزرسانی شد.' });
     }
 
     // API دریافت کاربران
@@ -132,6 +154,10 @@ export default {
     if (path === '/api/users' && request.method === 'POST') {
       const body = await request.json();
       const users = await getUsers(env);
+
+      if (!body.name || !body.name.trim()) {
+        return jsonResponse({ success: false, message: 'نام کاربر الزامی است.' }, 400);
+      }
 
       let expireDate = null;
       if (body.expireDays && parseInt(body.expireDays) > 0) {
@@ -162,7 +188,7 @@ export default {
       const userId = parts[3];
       const action = parts[4];
       const users = await getUsers(env);
-      const index = users.findIndex(u => u.id === userId);
+      const index = users.findIndex(u => u.id === userId || u.uuid === userId);
 
       if (index === -1) return jsonResponse({ success: false, message: 'کاربر یافت نشد.' }, 404);
 
@@ -175,7 +201,7 @@ export default {
       if (action === 'reset-traffic' && request.method === 'POST') {
         users[index].usedBytes = 0;
         await saveUsers(env, users);
-        return jsonResponse({ success: true, message: 'ترافیک صفر شد.' });
+        return jsonResponse({ success: true, message: 'ترافیک کاربر صفر شد.' });
       }
 
       if (request.method === 'PUT') {
@@ -190,19 +216,6 @@ export default {
       }
     }
 
-    // API تغییر تنظیمات
-    if (path === '/api/change-password' && request.method === 'POST') {
-      const body = await request.json();
-      const settings = await getSettings(env);
-
-      if (body.newUsername) settings.username = body.newUsername.trim();
-      if (body.newPassword) settings.password = body.newPassword.trim();
-      if (body.cleanIp !== undefined) settings.cleanIp = body.cleanIp.trim();
-
-      await saveSettings(env, settings);
-      return jsonResponse({ success: true, message: 'تنظیمات با موفقیت ذخیره شد.' });
-    }
-
     // API لیست آی‌پی‌های تمیز
     if (path === '/api/clean-ips') {
       const settings = await getSettings(env);
@@ -211,17 +224,21 @@ export default {
 
     // مسیر سابسکریپشن هوشمند (/sub/:uuid)
     if (path.startsWith('/sub/')) {
-      const uuid = path.split('/sub/')[1];
-      const users = await getUsers(env);
-      const user = users.find(u => u.uuid === uuid);
+      const rawUuid = path.split('/sub/')[1] || '';
+      const cleanUuid = rawUuid.split('/')[0].split('?')[0].trim().toLowerCase();
 
-      if (!user) return new Response('User Not Found', { status: 404 });
+      const users = await getUsers(env);
+      const user = users.find(u => u.uuid.toLowerCase() === cleanUuid || u.id === cleanUuid);
+
+      if (!user) {
+        return new Response('User Not Found / کاربر یافت نشد', { status: 404 });
+      }
 
       const settings = await getSettings(env);
       const host = url.hostname;
       const connectAddress = settings.cleanIp && settings.cleanIp.trim() !== '' ? settings.cleanIp.trim() : host;
 
-      const vlessConfig = `vless://${user.uuid}@${connectAddress}:443?type=ws&path=%2Fvless&security=tls&encryption=none&fp=chrome&sni=${host}&host=${host}#${encodeURIComponent(user.name + ' | Dizyno-Workers')}`;
+      const vlessConfig = `vless://${user.uuid}@${connectAddress}:443?type=ws&path=%2Fvless&security=tls&encryption=none&fp=chrome&sni=${host}&host=${host}#${encodeURIComponent(user.name + ' | Dizyno-Cloudflare')}`;
       const base64Config = btoa(vlessConfig);
 
       const userAgent = (request.headers.get('User-Agent') || '').toLowerCase();
@@ -251,7 +268,7 @@ export default {
       });
     }
 
-    // رندر فرانت‌اند داشبورد اصلی
+    // رندر داشبورد اصلی مدیریت
     return new Response(renderDashboardHtml(), {
       headers: { 'Content-Type': 'text/html; charset=utf-8' }
     });
@@ -280,7 +297,6 @@ async function handleVlessWebSocket(request, env) {
       const buffer = new Uint8Array(event.data);
       if (buffer.length < 18) return;
 
-      // خواندن آدرس مقصد و پورت از پروتکل VLESS
       const port = (buffer[18] << 8) | buffer[19];
       let addressType = buffer[20];
       let address = '';
@@ -299,7 +315,6 @@ async function handleVlessWebSocket(request, env) {
         remoteSocket = connect({ hostname: address, port });
         const writer = remoteSocket.writable.getWriter();
         
-        // ارسال پاسخ تایید به کلاینت VLESS
         server.send(new Uint8Array([buffer[0], 0]));
 
         writer.write(buffer.subarray(addressEnd));
@@ -324,7 +339,7 @@ async function handleVlessWebSocket(request, env) {
   });
 }
 
-// رندر صفحه وب سابسکریپشن
+// رندر صفحه وب سابسکریپشن کاربر
 function renderSubHtml(user, origin, configLink) {
   const usedGB = (user.usedBytes / (1024 * 1024 * 1024)).toFixed(2);
   const limitGB = user.limitBytes > 0 ? (user.limitBytes / (1024 * 1024 * 1024)).toFixed(2) : 'نامحدود';
@@ -335,41 +350,53 @@ function renderSubHtml(user, origin, configLink) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>دیزاینو وی پی ان | ${user.name}</title>
+  <title>دیزاینو وی پی ان | وضعیت اشتراک ${user.name}</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.rtl.min.css">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <link href="https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/Vazirmatn-font-face.css" rel="stylesheet">
   <style>
-    body { font-family: 'Vazirmatn', sans-serif; background: #090d16; color: #f8fafc; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px; }
-    .card-box { background: rgba(18, 25, 41, 0.9); backdrop-filter: blur(16px); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 24px; padding: 28px; max-width: 440px; width: 100%; }
-    .qr-box { background: #fff; padding: 10px; border-radius: 16px; display: inline-block; }
+    body { font-family: 'Vazirmatn', sans-serif; background: #090d16; color: #f8fafc; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px; margin: 0; }
+    .card-box { background: rgba(18, 25, 41, 0.92); backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 28px; padding: 28px; max-width: 440px; width: 100%; box-shadow: 0 25px 60px rgba(0,0,0,0.6); }
+    .qr-box { background: #fff; padding: 12px; border-radius: 20px; display: inline-block; box-shadow: 0 10px 25px rgba(0,0,0,0.3); }
+    .btn-action { border-radius: 14px; padding: 14px; font-weight: 700; transition: all 0.25s ease; }
+    .btn-action:hover { transform: translateY(-2px); }
   </style>
 </head>
 <body>
   <div class="card-box text-center">
-    <h4 class="fw-bold mb-1 text-white">${user.name}</h4>
-    <p class="text-muted small mb-4">دیزاینو وی پی ان | نسخه Cloudflare Workers</p>
+    <div class="d-flex align-items-center justify-content-between mb-4">
+      <div class="d-flex align-items-center gap-2 text-start">
+        <div class="bg-primary text-white p-2.5 rounded-3 d-flex align-items-center justify-content-center" style="width:44px; height:44px;">
+          <i class="fa-solid fa-bolt fs-5"></i>
+        </div>
+        <div>
+          <h5 class="fw-bold text-white mb-0">${user.name}</h5>
+          <span class="text-muted small">دیزاینو وی پی ان | Cloudflare</span>
+        </div>
+      </div>
+      <span class="badge bg-success rounded-pill px-3 py-2">فعال</span>
+    </div>
     
-    <div class="p-3 bg-dark rounded-4 mb-3 text-start small">
-      <div class="d-flex justify-content-between mb-1">
-        <span>حجم مصرفی:</span>
-        <strong class="text-info">${usedGB} GB / ${limitGB} GB</strong>
+    <div class="p-3 bg-dark rounded-4 mb-4 text-start small border border-secondary border-opacity-25">
+      <div class="d-flex justify-content-between mb-2">
+        <span class="text-muted">حجم مصرفی:</span>
+        <strong class="text-info fs-6">${usedGB} GB / ${limitGB} ${limitGB !== 'نامحدود' ? 'GB' : ''}</strong>
       </div>
       <div class="d-flex justify-content-between">
-        <span>اعتبار:</span>
-        <strong class="text-warning">${user.expireDate || 'نامحدود'}</strong>
+        <span class="text-muted">تاریخ اعتبار:</span>
+        <strong class="text-warning fs-6">${user.expireDate || 'نامحدود'}</strong>
       </div>
     </div>
 
     <div class="qr-box mb-4">
-      <img src="https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(subUrl)}" width="180" height="180">
+      <img src="https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(subUrl)}" width="180" height="180" alt="QR Code">
     </div>
 
     <div class="d-grid gap-2">
-      <button class="btn btn-primary py-2.5 rounded-3 fw-bold" onclick="navigator.clipboard.writeText('${subUrl}').then(() => alert('لینک ساب کپی شد!'))">
+      <button class="btn btn-primary btn-action" onclick="navigator.clipboard.writeText('${subUrl}').then(() => alert('لینک سابسکریپشن کپی شد!'))">
         <i class="fa-solid fa-link me-2"></i> کپی لینک ساب (Subscription)
       </button>
-      <button class="btn btn-outline-light py-2.5 rounded-3 fw-bold" onclick="navigator.clipboard.writeText('${configLink}').then(() => alert('کانفیگ کپی شد!'))">
+      <button class="btn btn-outline-light btn-action" onclick="navigator.clipboard.writeText('${configLink}').then(() => alert('کانفیگ VLESS کپی شد!'))">
         <i class="fa-solid fa-copy me-2"></i> کپی مستقیم کانفیگ VLESS
       </button>
     </div>
@@ -378,69 +405,181 @@ function renderSubHtml(user, origin, configLink) {
 </html>`;
 }
 
-// رندر داشبورد اصلی مدیریت
+// رندر کامل داشبورد گرافیکی مدیریت با تمام مودال‌ها
 function renderDashboardHtml() {
   return `<!DOCTYPE html>
-<html lang="fa" dir="rtl">
+<html lang="fa" dir="rtl" data-theme="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>دیزاینو وی پی ان | Cloudflare Workers Edition</title>
+  <title>پنل دیزاینو وی پی ان | نسخه Cloudflare Workers</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.rtl.min.css">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <link href="https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/Vazirmatn-font-face.css" rel="stylesheet">
   <style>
-    body { font-family: 'Vazirmatn', sans-serif; background: #070a13; color: #f8fafc; min-height: 100vh; }
-    .card-dark { background: rgba(18, 25, 41, 0.9); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 20px; }
-    .form-control-dark { background: #090d16; border: 1px solid rgba(255, 255, 255, 0.12); color: #fff; border-radius: 12px; }
+    :root, [data-theme="dark"] {
+      --bg-primary: #070a13;
+      --bg-card: rgba(18, 25, 41, 0.92);
+      --bg-input: #090d16;
+      --border-color: rgba(255, 255, 255, 0.12);
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+    }
+    [data-theme="light"] {
+      --bg-primary: #f1f5f9;
+      --bg-card: #ffffff;
+      --bg-input: #ffffff;
+      --border-color: #cbd5e1;
+      --text-main: #0f172a;
+      --text-muted: #475569;
+    }
+    body { font-family: 'Vazirmatn', sans-serif; background: var(--bg-primary); color: var(--text-main); min-height: 100vh; transition: background 0.3s; }
+    .navbar-custom { background: var(--bg-card); border-bottom: 1px solid var(--border-color); padding: 16px 28px; }
+    .card-dark { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 24px; padding: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); }
+    .form-control-dark { background: var(--bg-input); border: 1px solid var(--border-color); color: var(--text-main); border-radius: 14px; padding: 12px 16px; }
+    .form-control-dark:focus { background: var(--bg-input); color: var(--text-main); border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,0.2); }
+    .modal-content-dark { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 24px; color: var(--text-main); }
   </style>
 </head>
-<body class="p-3 p-md-5">
+<body>
 
-  <div id="setupView" class="container max-w-md mx-auto d-none" style="max-width: 420px;">
-    <div class="card-dark p-4 text-center">
-      <h3 class="fw-bold mb-3 text-white">راه‌اندازی اولیه ورکر کلودفلر</h3>
+  <!-- 1. راه‌اندازی اولیه -->
+  <div id="setupView" class="min-vh-100 d-flex align-items-center justify-content-center p-3 d-none">
+    <div class="card-dark text-center" style="max-width: 420px; width: 100%;">
+      <div class="bg-primary text-white rounded-4 p-3 d-inline-flex mb-3" style="width:60px; height:60px; align-items:center; justify-content:center;">
+        <i class="fa-solid fa-bolt fs-2"></i>
+      </div>
+      <h4 class="fw-bold mb-1">راه‌اندازی اولیه پنل دیزاینو</h4>
+      <p class="text-muted small mb-4">تعیین نام کاربری و کلمه عبور ادمین برای Cloudflare Workers</p>
       <form id="setupForm">
         <input type="text" id="setupUsername" class="form-control form-control-dark mb-3" placeholder="نام کاربری ادمین" required>
-        <input type="password" id="setupPassword" class="form-control form-control-dark mb-3" placeholder="کلمه عبور" required>
-        <button type="submit" class="btn btn-primary w-100 py-2.5 rounded-3 fw-bold">ثبت و ورود</button>
+        <input type="password" id="setupPassword" class="form-control form-control-dark mb-4" placeholder="کلمه عبور جدید" required>
+        <button type="submit" class="btn btn-primary w-100 py-3 rounded-3 fw-bold fs-6">ثبت و ورود به پنل</button>
       </form>
     </div>
   </div>
 
-  <div id="loginView" class="container mx-auto d-none" style="max-width: 420px;">
-    <div class="card-dark p-4 text-center">
-      <h3 class="fw-bold mb-3 text-white">ورود به پنل دیزاینو کلودفلر</h3>
+  <!-- 2. ورود ادمین -->
+  <div id="loginView" class="min-vh-100 d-flex align-items-center justify-content-center p-3 d-none">
+    <div class="card-dark text-center" style="max-width: 420px; width: 100%;">
+      <div class="bg-indigo text-white rounded-4 p-3 d-inline-flex mb-3" style="width:60px; height:60px; background:#6366f1; align-items:center; justify-content:center;">
+        <i class="fa-solid fa-lock fs-2"></i>
+      </div>
+      <h4 class="fw-bold mb-1">ورود به پنل دیزاینو</h4>
+      <p class="text-muted small mb-4">نسخه اختصاصی Cloudflare Workers</p>
       <form id="loginForm">
         <input type="text" id="loginUsername" class="form-control form-control-dark mb-3" placeholder="نام کاربری" required>
-        <input type="password" id="loginPassword" class="form-control form-control-dark mb-3" placeholder="کلمه عبور" required>
-        <button type="submit" class="btn btn-primary w-100 py-2.5 rounded-3 fw-bold">ورود به سیستم</button>
+        <input type="password" id="loginPassword" class="form-control form-control-dark mb-4" placeholder="کلمه عبور" required>
+        <button type="submit" class="btn btn-primary w-100 py-3 rounded-3 fw-bold fs-6">ورود به سیستم</button>
       </form>
     </div>
   </div>
 
-  <div id="dashView" class="container d-none">
-    <div class="d-flex justify-content-between align-items-center mb-4">
-      <h4 class="fw-bold text-white mb-0"><i class="fa-solid fa-bolt text-primary me-2"></i> پنل دیزاینو وی پی ان (Cloudflare Edition)</h4>
-      <button class="btn btn-sm btn-outline-danger rounded-3" onclick="location.reload()">خروج</button>
-    </div>
-
-    <div class="card-dark p-4 mb-4">
-      <div class="d-flex justify-content-between align-items-center mb-3">
-        <h5 class="fw-bold text-white mb-0">مدیریت کاربران</h5>
-        <button class="btn btn-primary btn-sm rounded-3" onclick="createUserPrompt()">+ ساخت کاربر جدید</button>
+  <!-- 3. داشبورد اصلی -->
+  <div id="dashView" class="d-none">
+    <nav class="navbar-custom d-flex justify-content-between align-items-center flex-wrap gap-2 mb-4">
+      <div class="d-flex align-items-center gap-3">
+        <div class="bg-primary text-white rounded-3 p-2 d-flex align-items-center justify-content-center" style="width:40px; height:40px;">
+          <i class="fa-solid fa-bolt"></i>
+        </div>
+        <div>
+          <h5 class="fw-bold mb-0">پنل دیزاینو وی پی ان</h5>
+          <span class="small text-muted">نسخه کلودفلر (Cloudflare Workers)</span>
+        </div>
       </div>
-      <div class="table-responsive">
-        <table class="table table-dark table-hover align-middle">
-          <thead>
-            <tr><th>#</th><th>نام کاربر</th><th>حجم مصرفی</th><th>تاریخ انقضا</th><th class="text-center">عملیات</th></tr>
-          </thead>
-          <tbody id="userTable"></tbody>
-        </table>
+      <div class="d-flex align-items-center gap-2">
+        <button class="btn btn-sm btn-outline-warning rounded-3" onclick="toggleTheme()" title="تغییر تم (تیره / روشن)">
+          <i class="fa-solid fa-sun" id="themeIcon"></i>
+        </button>
+        <button class="btn btn-sm btn-outline-info rounded-3" data-bs-toggle="modal" data-bs-target="#cleanIpModal">
+          <i class="fa-solid fa-network-wired me-1"></i> آی‌پی تمیز
+        </button>
+        <button class="btn btn-sm btn-outline-danger rounded-3" onclick="location.reload()">
+          <i class="fa-solid fa-power-off"></i>
+        </button>
+      </div>
+    </nav>
+
+    <div class="container-fluid px-3 px-md-5">
+      <div class="card-dark mb-4">
+        <div class="d-flex justify-content-between align-items-center flex-wrap gap-3 mb-4">
+          <h5 class="fw-bold mb-0"><i class="fa-solid fa-users text-primary me-2"></i> لیست کاربران</h5>
+          <button class="btn btn-primary rounded-3 px-4 py-2.5 fw-bold" data-bs-toggle="modal" data-bs-target="#createUserModal">
+            <i class="fa-solid fa-user-plus me-2"></i> ساخت کاربر جدید
+          </button>
+        </div>
+
+        <div class="table-responsive">
+          <table class="table table-dark table-hover align-middle mb-0">
+            <thead>
+              <tr class="text-muted">
+                <th>#</th>
+                <th>نام کاربر</th>
+                <th>حجم مصرفی</th>
+                <th>اعتبار (روز)</th>
+                <th>وضعیت</th>
+                <th class="text-center">عملیات</th>
+              </tr>
+            </thead>
+            <tbody id="userTable"></tbody>
+          </table>
+        </div>
       </div>
     </div>
   </div>
 
+  <!-- مودال ساخت کاربر جدید -->
+  <div class="modal fade" id="createUserModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content modal-content-dark">
+        <div class="modal-header border-secondary border-opacity-25">
+          <h5 class="modal-title fw-bold"><i class="fa-solid fa-user-plus text-primary me-2"></i> ساخت کاربر جدید</h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+        </div>
+        <form id="createUserForm">
+          <div class="modal-body">
+            <div class="mb-3">
+              <label class="form-label small text-muted">نام کاربر</label>
+              <input type="text" id="newUserName" class="form-control form-control-dark" placeholder="مثال: ali_user" required>
+            </div>
+            <div class="mb-3">
+              <label class="form-label small text-muted">حجم مجاز (گیگابایت - GB)</label>
+              <input type="number" id="newUserLimitGB" class="form-control form-control-dark" placeholder="مثال: 50 (0 یعنی نامحدود)" value="50">
+            </div>
+            <div class="mb-3">
+              <label class="form-label small text-muted">مدت زمان اعتبار (روز)</label>
+              <input type="number" id="newUserExpireDays" class="form-control form-control-dark" placeholder="مثال: 30" value="30">
+            </div>
+          </div>
+          <div class="modal-footer border-secondary border-opacity-25">
+            <button type="button" class="btn btn-outline-secondary rounded-3" data-bs-dismiss="modal">انصراف</button>
+            <button type="submit" class="btn btn-primary rounded-3 px-4 fw-bold">ایجاد کاربر</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- مودال اسکنر آی‌پی تمیز -->
+  <div class="modal fade" id="cleanIpModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content modal-content-dark">
+        <div class="modal-header border-secondary border-opacity-25">
+          <h5 class="modal-title fw-bold"><i class="fa-solid fa-network-wired text-info me-2"></i> تنظیم آی‌پی تمیز</h5>
+          <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <div class="mb-3">
+            <label class="form-label small text-muted">آی‌پی یا دامنه تمیز اختصاصی</label>
+            <input type="text" id="cleanIpInput" class="form-control form-control-dark" placeholder="مثال: 162.159.192.1">
+          </div>
+          <button class="btn btn-info w-100 rounded-3 py-2 fw-bold text-white mb-3" onclick="saveCleanIp()">ذخیره و اعمال روی کانفیگ‌ها</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
   <script>
     async function init() {
       const res = await fetch('/api/setup-status');
@@ -481,6 +620,27 @@ function renderDashboardHtml() {
       else alert(data.message);
     });
 
+    document.getElementById('createUserForm')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const name = document.getElementById('newUserName').value;
+      const limitGB = document.getElementById('newUserLimitGB').value;
+      const expireDays = document.getElementById('newUserExpireDays').value;
+
+      const res = await fetch('/api/users', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ name, limitGB, expireDays })
+      });
+      const data = await res.json();
+      if (data.success) {
+        bootstrap.Modal.getInstance(document.getElementById('createUserModal')).hide();
+        document.getElementById('newUserName').value = '';
+        loadUsers();
+      } else {
+        alert(data.message);
+      }
+    });
+
     async function showDash() {
       document.getElementById('setupView').classList.add('d-none');
       document.getElementById('loginView').classList.add('d-none');
@@ -495,36 +655,53 @@ function renderDashboardHtml() {
       tbody.innerHTML = '';
       data.users.forEach((u, i) => {
         const subUrl = location.origin + '/sub/' + u.uuid;
+        const htmlSubUrl = subUrl + '?html=true';
+        const usedGB = (u.usedBytes/(1024*1024*1024)).toFixed(2);
+        const limitGB = u.limitBytes > 0 ? (u.limitBytes/(1024*1024*1024)).toFixed(2) : 'نامحدود';
+
         tbody.innerHTML += \`
           <tr>
             <td>\${i+1}</td>
             <td><strong>\${u.name}</strong></td>
-            <td>\${(u.usedBytes/(1024*1024*1024)).toFixed(2)} GB</td>
+            <td><span class="text-info">\${usedGB} GB</span> / <span class="text-muted">\${limitGB}</span></td>
             <td>\${u.expireDate || 'نامحدود'}</td>
+            <td><span class="badge bg-success rounded-pill px-3 py-1.5">فعال</span></td>
             <td class="text-center">
-              <button class="btn btn-sm btn-outline-info me-1" onclick="navigator.clipboard.writeText('\${subUrl}').then(()=>alert('کپی شد!'))">کپی ساب</button>
-              <button class="btn btn-sm btn-outline-danger" onclick="deleteUser('\${u.id}')">حذف</button>
+              <button class="btn btn-sm btn-outline-primary me-1 rounded-3" onclick="copyText('\${subUrl}', 'لینک ساب کپی شد!')" title="کپی لینک سابسکریپشن"><i class="fa-solid fa-link"></i> کپی ساب</button>
+              <button class="btn btn-sm btn-outline-info me-1 rounded-3" onclick="window.open('\${htmlSubUrl}', '_blank')" title="مشاهده صفحه ساب"><i class="fa-solid fa-qrcode"></i> صفحه ساب</button>
+              <button class="btn btn-sm btn-outline-danger rounded-3" onclick="deleteUser('\${u.id}')" title="حذف کاربر"><i class="fa-solid fa-trash"></i></button>
             </td>
           </tr>
         \`;
       });
     }
 
-    async function createUserPrompt() {
-      const name = prompt('نام کاربر جدید را وارد کنید:');
-      if (!name) return;
-      await fetch('/api/users', {
-        method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ name, limitGB: 50, expireDays: 30 })
-      });
-      loadUsers();
+    function copyText(text, msg) {
+      navigator.clipboard.writeText(text).then(() => alert(msg)).catch(() => alert('امکان کپی وجود ندارد.'));
     }
 
     async function deleteUser(id) {
-      if (!confirm('حذف کاربر؟')) return;
+      if (!confirm('آیا از حذف این کاربر اطمینان دارید؟')) return;
       await fetch('/api/users/' + id, { method: 'DELETE' });
       loadUsers();
+    }
+
+    async function saveCleanIp() {
+      const cleanIp = document.getElementById('cleanIpInput').value;
+      await fetch('/api/settings', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ cleanIp })
+      });
+      alert('آی‌پی تمیز ذخیره شد.');
+      bootstrap.Modal.getInstance(document.getElementById('cleanIpModal')).hide();
+    }
+
+    function toggleTheme() {
+      const current = document.documentElement.getAttribute('data-theme');
+      const next = current === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', next);
+      document.getElementById('themeIcon').className = next === 'light' ? 'fa-solid fa-moon' : 'fa-solid fa-sun';
     }
 
     init();
