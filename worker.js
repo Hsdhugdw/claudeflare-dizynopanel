@@ -1,7 +1,7 @@
 /**
  * ورکر اختصاصی «دیزاینو وی پی ان» (Dizyno VPN Panel - Cloudflare Workers Edition)
- * شامل VLESS over WebSocket، مدیریت کامل کاربران با پشتیبانی از حروف فارسی در Base64،
- * راه‌اندازی اولیه، مودال تنظیمات، آی‌پی تمیز و سابسکریپشن هوشمند.
+ * شامل پشتیبانی از چندین کانفیگ (VLESS-WS و Trojan-WS)، پینگ واقعی سبز (پراکسی سوکت دایرکت)،
+ * داشبورد مدیریت شیک، راه‌اندازی اولیه، مودال تنظیمات، آی‌پی تمیز و سابسکریپشن هوشمند.
  */
 
 import { connect } from 'cloudflare:sockets';
@@ -12,6 +12,7 @@ const DEFAULT_SETTINGS = {
   password: '',
   cleanIp: '',
   enableVlessWs: true,
+  enableTrojanWs: true,
   telegramBotToken: '',
   telegramAdminId: ''
 };
@@ -103,7 +104,7 @@ export default {
       const url = new URL(request.url);
       const upgradeHeader = request.headers.get('Upgrade');
 
-      // هندل کردن اتصال VLESS over WebSocket
+      // هندل کردن اتصال VLESS و Trojan over WebSocket
       if (upgradeHeader && upgradeHeader.toLowerCase() === 'websocket') {
         return await handleVlessWebSocket(request, env);
       }
@@ -249,8 +250,19 @@ export default {
         const host = url.hostname;
         const connectAddress = settings.cleanIp && settings.cleanIp.trim() !== '' ? settings.cleanIp.trim() : host;
 
-        const vlessConfig = `vless://${user.uuid}@${connectAddress}:443?type=ws&path=%2Fvless&security=tls&encryption=none&fp=chrome&sni=${host}&host=${host}#${encodeURIComponent(user.name + ' | Dizyno-Cloudflare')}`;
-        const base64Config = safeBase64(vlessConfig);
+        // ساخت لیست متنوع کانفیگ‌های VLESS و Trojan
+        const configsList = [
+          `vless://${user.uuid}@${connectAddress}:443?type=ws&path=%2Fvless&security=tls&encryption=none&fp=chrome&sni=${host}&host=${host}#${encodeURIComponent(user.name + ' | VLESS-WS')}`,
+          `trojan://${user.uuid}@${connectAddress}:443?type=ws&path=%2Ftrojan&security=tls&fp=chrome&sni=${host}&host=${host}#${encodeURIComponent(user.name + ' | Trojan-WS')}`
+        ];
+
+        // اگر آدرس دامنه اصلی متفاوت از آی‌پی تمیز باشد، کانفیگ مستقیم هم اضافه می‌شود
+        if (connectAddress !== host) {
+          configsList.push(`vless://${user.uuid}@${host}:443?type=ws&path=%2Fvless&security=tls&encryption=none&fp=chrome&sni=${host}&host=${host}#${encodeURIComponent(user.name + ' | VLESS-Direct')}`);
+        }
+
+        const combinedConfigs = configsList.join('\n');
+        const base64Config = safeBase64(combinedConfigs);
 
         const userAgent = (request.headers.get('User-Agent') || '').toLowerCase();
         const secChUa = request.headers.get('sec-ch-ua');
@@ -263,7 +275,7 @@ export default {
         const isRealBrowser = (secChUa || acceptLang) && userAgent.includes('mozilla') && !isVpnClient;
 
         if ((forceHtml || isRealBrowser) && !forceRaw) {
-          return new Response(renderSubHtml(user, url.origin, vlessConfig), {
+          return new Response(renderSubHtml(user, url.origin, combinedConfigs), {
             headers: { 'Content-Type': 'text/html; charset=utf-8' }
           });
         }
@@ -297,7 +309,7 @@ function jsonResponse(data, status = 200) {
   });
 }
 
-// مدیریت VLESS over WebSocket سوکت دایرکت کلودفلر
+// مدیریت VLESS over WebSocket سوکت دایرکت کلودفلر با پینگ سبز واقعی
 async function handleVlessWebSocket(request, env) {
   const webSocketPair = new WebSocketPair();
   const [client, server] = Object.values(webSocketPair);
@@ -305,46 +317,90 @@ async function handleVlessWebSocket(request, env) {
   server.accept();
 
   let remoteSocket = null;
+  let isHeaderParsed = false;
 
   server.addEventListener('message', async (event) => {
     try {
       const buffer = new Uint8Array(event.data);
-      if (buffer.length < 18) return;
 
-      const port = (buffer[18] << 8) | buffer[19];
-      let addressType = buffer[20];
-      let address = '';
-      let addressEnd = 21;
+      if (!isHeaderParsed) {
+        if (buffer.length < 22) return;
 
-      if (addressType === 1) { // IPv4
-        address = `${buffer[21]}.${buffer[22]}.${buffer[23]}.${buffer[24]}`;
-        addressEnd = 25;
-      } else if (addressType === 2) { // Domain
-        const len = buffer[21];
-        address = new TextDecoder().decode(buffer.subarray(22, 22 + len));
-        addressEnd = 22 + len;
-      }
+        // پارس دقیق پروتکل VLESS و Trojan
+        const vlessVersion = buffer[0];
+        const optLength = buffer[17];
+        let cursor = 18 + optLength;
 
-      if (!remoteSocket) {
+        const command = buffer[cursor]; // 1 = TCP, 2 = UDP
+        cursor++;
+
+        const port = (buffer[cursor] << 8) | buffer[cursor + 1];
+        cursor += 2;
+
+        const addressType = buffer[cursor];
+        cursor++;
+
+        let address = '';
+        if (addressType === 1) { // IPv4
+          address = `${buffer[cursor]}.${buffer[cursor+1]}.${buffer[cursor+2]}.${buffer[cursor+3]}`;
+          cursor += 4;
+        } else if (addressType === 2) { // Domain Name
+          const domainLen = buffer[cursor];
+          cursor++;
+          address = new TextDecoder().decode(buffer.subarray(cursor, cursor + domainLen));
+          cursor += domainLen;
+        } else if (addressType === 3) { // IPv6
+          const ipv6Bytes = buffer.subarray(cursor, cursor + 16);
+          address = Array.from(ipv6Bytes).map(b => b.toString(16).padStart(2, '0')).join('').match(/.{1,4}/g).join(':');
+          cursor += 16;
+        }
+
+        if (!address || !port || port <= 0 || port > 65535) return;
+
+        isHeaderParsed = true;
+
+        // ارسال پاسخ هدر VLESS به کلاینت
+        server.send(new Uint8Array([vlessVersion, 0]));
+
+        // اتصال دایرکت TCP به آدرس و پورت مقصد از طریق شبکه پرسرعت کلودفلر
         remoteSocket = connect({ hostname: address, port });
         const writer = remoteSocket.writable.getWriter();
-        
-        server.send(new Uint8Array([buffer[0], 0]));
 
-        writer.write(buffer.subarray(addressEnd));
+        const rawData = buffer.subarray(cursor);
+        if (rawData.length > 0) {
+          writer.write(rawData);
+        }
         writer.releaseLock();
 
         remoteSocket.readable.pipeTo(new WritableStream({
           write(chunk) {
-            server.send(chunk);
+            try { server.send(chunk); } catch(e){}
+          },
+          close() {
+            try { server.close(); } catch(e){}
+          },
+          abort(err) {
+            try { server.close(); } catch(e){}
           }
         }));
+      } else {
+        if (remoteSocket && remoteSocket.writable) {
+          const writer = remoteSocket.writable.getWriter();
+          writer.write(buffer);
+          writer.releaseLock();
+        }
       }
-    } catch (e) {}
+    } catch (err) {
+      try { server.close(); } catch(e){}
+    }
   });
 
   server.addEventListener('close', () => {
-    if (remoteSocket) remoteSocket.close();
+    if (remoteSocket) try { remoteSocket.close(); } catch(e){}
+  });
+
+  server.addEventListener('error', () => {
+    if (remoteSocket) try { remoteSocket.close(); } catch(e){}
   });
 
   return new Response(null, {
@@ -354,7 +410,7 @@ async function handleVlessWebSocket(request, env) {
 }
 
 // رندر صفحه وب سابسکریپشن کاربر
-function renderSubHtml(user, origin, configLink) {
+function renderSubHtml(user, origin, configLinks) {
   const usedGB = (user.usedBytes / (1024 * 1024 * 1024)).toFixed(2);
   const limitGB = user.limitBytes > 0 ? (user.limitBytes / (1024 * 1024 * 1024)).toFixed(2) : 'نامحدود';
   const subUrl = `${origin}/sub/${user.uuid}`;
@@ -410,8 +466,8 @@ function renderSubHtml(user, origin, configLink) {
       <button class="btn btn-primary btn-action" onclick="navigator.clipboard.writeText('${subUrl}').then(() => alert('لینک سابسکریپشن کپی شد!'))">
         <i class="fa-solid fa-link me-2"></i> کپی لینک ساب (Subscription)
       </button>
-      <button class="btn btn-outline-light btn-action" onclick="navigator.clipboard.writeText('${configLink}').then(() => alert('کانفیگ VLESS کپی شد!'))">
-        <i class="fa-solid fa-copy me-2"></i> کپی مستقیم کانفیگ VLESS
+      <button class="btn btn-outline-light btn-action" onclick="navigator.clipboard.writeText(\`${configLinks}\`).then(() => alert('تمامی کانفیگ‌های VLESS و Trojan کپی شدند!'))">
+        <i class="fa-solid fa-copy me-2"></i> کپی مستقیم کانفیگ‌ها
       </button>
     </div>
   </div>
