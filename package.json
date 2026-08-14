@@ -1,0 +1,12 @@
+{
+  "name": "dizyno-vpn-cloudflare",
+  "version": "1.0.0",
+  "description": "پنل دیزاینو وی پی ان - نسخه اختصاصی Cloudflare Workers",
+  "main": "worker.js",
+  "scripts": {
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  }
+}
