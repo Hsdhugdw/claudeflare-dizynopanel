@@ -25,7 +25,7 @@
 1. روی دکمه زیر کلیک کنید:  
    [![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/Hsdhugdw/claudeflare-dizynopanel)
 2. به صورت خودکار پروژه وارد حساب کلودفلر شما شده و بیلد می‌گردد.
-3. **نکته مهم پس از اتمام بیلد:** در صفحه نمایش داده‌شده داشبورد کلودفلر، در سمت راست بالا روی دکمه **`</> Edit code`** کلیک کنید و دکمه **Save and deploy** را بزنید تا پنل و دامنه شما بلافاصله روشن و آنلاین شوند!
+3. **نکته مهم پس از اتمام بیلد:** در صفحه داشبورد کلودفلر، در سمت راست بالا روی دکمه **`</> Edit code`** کلیک کرده و سپس دکمه **Visit** یا **Save and deploy** را بزنید تا پنل مدیریت بلافاصله باز شود!
 
 ---
 
