@@ -111,6 +111,13 @@ export default {
 
       const path = url.pathname;
 
+      // API وب‌هوک ربات تلگرام
+      if (path === '/api/telegram-webhook' && request.method === 'POST') {
+        const body = await request.json();
+        await handleTelegramWorkerUpdate(body, env, url.origin);
+        return jsonResponse({ success: true });
+      }
+
       // API بررسی وضعیت راه‌اندازی
       if (path === '/api/setup-status') {
         const settings = await getSettings(env);
@@ -307,6 +314,219 @@ function jsonResponse(data, status = 200) {
     status,
     headers: { 'Content-Type': 'application/json; charset=utf-8' }
   });
+}
+
+// ارسال پیام تلگرام در نسخه کلودفلر ورکر
+async function sendTelegramWorkerMessage(env, text, replyMarkup = null, customChatId = null) {
+  const settings = await getSettings(env);
+  if (!settings.telegramBotToken) return;
+
+  const chatId = customChatId || settings.telegramAdminId;
+  if (!chatId) return;
+
+  const payload = {
+    chat_id: chatId,
+    text: text,
+    parse_mode: 'Markdown'
+  };
+
+  if (replyMarkup) {
+    payload.reply_markup = replyMarkup;
+  }
+
+  await fetch(`https://api.telegram.org/bot${settings.telegramBotToken}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+}
+
+function getTelegramWorkerMainMenuKeyboard() {
+  return {
+    keyboard: [
+      [{ text: '📊 آمار سرور' }, { text: '👥 لیست کاربران' }],
+      [{ text: '➕ ساخت کاربر جدید' }, { text: '🔍 استعلام کاربر' }]
+    ],
+    resize_keyboard: true,
+    persistent: true
+  };
+}
+
+// پردازش دستورات ورودی تلگرام در نسخه کلودفلر
+async function handleTelegramWorkerUpdate(update, env, origin) {
+  if (!update || !update.message || !update.message.text) return;
+
+  const msg = update.message;
+  const chatId = msg.chat.id;
+  const text = msg.text.trim();
+
+  const settings = await getSettings(env);
+
+  // تنها پاسخ به ادمین یا در صورت عدم تنظیم ادمین آی‌دی به همه
+  if (settings.telegramAdminId && chatId.toString() !== settings.telegramAdminId.toString()) {
+    await sendTelegramWorkerMessage(env, '⛔ دسترسی غیرمجاز. این ربات تنها برای مدیریت سرور تنظیم شده است.', null, chatId);
+    return;
+  }
+
+  // دستور /start یا منو
+  if (text === '/start' || text === 'منو' || text === 'menu') {
+    await sendTelegramWorkerMessage(
+      env,
+      `⚡ **به ربات مدیریتی «دیزاینو وی پی ان» (Cloudflare Edition) خوش آمدید!**\n\nلطفاً یکی از گزینه‌های زیر را انتخاب کنید:`,
+      getTelegramWorkerMainMenuKeyboard(),
+      chatId
+    );
+    return;
+  }
+
+  // آمار سرور
+  if (text === '📊 آمار سرور' || text === '/stats') {
+    const users = await getUsers(env);
+    const today = new Date().toISOString().split('T')[0];
+
+    const totalUsers = users.length;
+    const activeUsers = users.filter(u => u.status === 'active' && (!u.expireDate || u.expireDate >= today) && (u.limitBytes === 0 || u.usedBytes < u.limitBytes)).length;
+    const expiredUsers = users.filter(u => (u.expireDate && u.expireDate < today) || (u.limitBytes > 0 && u.usedBytes >= u.limitBytes)).length;
+
+    const totalUsedBytes = users.reduce((acc, u) => acc + (u.usedBytes || 0), 0);
+    const usedGB = (totalUsedBytes / (1024 * 1024 * 1024)).toFixed(2);
+
+    await sendTelegramWorkerMessage(
+      env,
+      `📊 **آمار کلی پنل دیزاینو کلودفلر:**\n\n` +
+      `👥 **کل کاربران:** ${totalUsers} نفر\n` +
+      `✅ **کاربران فعال:** ${activeUsers} نفر\n` +
+      `❌ **کاربران منقضی:** ${expiredUsers} نفر\n` +
+      `🌐 **کل ترافیک مصرفی:** ${usedGB} GB`,
+      getTelegramWorkerMainMenuKeyboard(),
+      chatId
+    );
+    return;
+  }
+
+  // لیست کاربران
+  if (text === '👥 لیست کاربران' || text === '/users') {
+    const users = await getUsers(env);
+    if (users.length === 0) {
+      await sendTelegramWorkerMessage(env, 'ℹ️ هیچ کاربری در پنل ثبت نشده است.', getTelegramWorkerMainMenuKeyboard(), chatId);
+      return;
+    }
+
+    let reply = `👥 **لیست کاربران پنل:**\n\n`;
+    users.slice(0, 15).forEach((u, i) => {
+      const usedGB = (u.usedBytes / (1024 * 1024 * 1024)).toFixed(2);
+      const limitGB = u.limitBytes > 0 ? (u.limitBytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB' : 'نامحدود';
+      reply += `${i + 1}. 👤 **${u.name}** | 📊 ${usedGB}/${limitGB} | ⏳ ${u.expireDate || 'نامحدود'}\n/sub_${u.uuid}\n\n`;
+    });
+
+    await sendTelegramWorkerMessage(env, reply, getTelegramWorkerMainMenuKeyboard(), chatId);
+    return;
+  }
+
+  // راهنمای ساخت کاربر
+  if (text === '➕ ساخت کاربر جدید' || text === '/create') {
+    await sendTelegramWorkerMessage(
+      env,
+      `➕ **راهنمای ساخت کاربر جدید:**\n\n` +
+      `لطفاً دستور ساخت را به این فرمت ارسال کنید:\n` +
+      `\`create نام_کاربر حجم_GB روز_اعتبار\`\n\n` +
+      `📌 **مثال ساخت کاربر با ۵۰ گیگ و ۳۰ روز:**\n` +
+      `\`create ali 50 30\``,
+      getTelegramWorkerMainMenuKeyboard(),
+      chatId
+    );
+    return;
+  }
+
+  // ساخت کاربر مستقیم
+  if (text.startsWith('create ')) {
+    const parts = text.split(' ');
+    const name = parts[1];
+    const limitGB = parts[2] ? parseFloat(parts[2]) : 0;
+    const expireDays = parts[3] ? parseInt(parts[3]) : 0;
+
+    if (!name) {
+      await sendTelegramWorkerMessage(env, '❌ لطفاً نام کاربر را وارد کنید.', getTelegramWorkerMainMenuKeyboard(), chatId);
+      return;
+    }
+
+    const users = await getUsers(env);
+    let expireDate = null;
+    if (expireDays > 0) {
+      const d = new Date();
+      d.setDate(d.getDate() + expireDays);
+      expireDate = d.toISOString().split('T')[0];
+    }
+
+    const newUuid = crypto.randomUUID();
+    const newUser = {
+      id: newUuid,
+      uuid: newUuid,
+      name: name.trim(),
+      limitBytes: limitGB * 1024 * 1024 * 1024,
+      usedBytes: 0,
+      expireDate: expireDate,
+      status: 'active',
+      createdAt: new Date().toISOString()
+    };
+
+    users.push(newUser);
+    await saveUsers(env, users);
+
+    const subUrl = `${origin}/sub/${newUser.uuid}`;
+
+    await sendTelegramWorkerMessage(
+      env,
+      `✅ **کاربر با موفقیت در کلودفلر ایجاد شد!**\n\n` +
+      `👤 **نام:** ${newUser.name}\n` +
+      `📊 **حجم:** ${limitGB > 0 ? limitGB + ' GB' : 'نامحدود'}\n` +
+      `⏳ **اعتبار:** ${expireDays > 0 ? expireDays + ' روز' : 'نامحدود'}\n\n` +
+      `🔑 **UUID:** \`${newUser.uuid}\`\n\n` +
+      `🔗 **لینک ساب:**\n\`${subUrl}\``,
+      getTelegramWorkerMainMenuKeyboard(),
+      chatId
+    );
+    return;
+  }
+
+  // استعلام کاربر
+  if (text === '🔍 استعلام کاربر') {
+    await sendTelegramWorkerMessage(
+      env,
+      `🔍 **راهنمای استعلام کاربر:**\n\n` +
+      `برای دریافت لینک ساب و آمار کاربر، نام یا UUID آن را ارسال کنید:\n` +
+      `مثال:\n\`info ali\``,
+      getTelegramWorkerMainMenuKeyboard(),
+      chatId
+    );
+    return;
+  }
+
+  if (text.startsWith('info ') || text.startsWith('/sub_')) {
+    const query = text.replace('info ', '').replace('/sub_', '').trim().toLowerCase();
+    const users = await getUsers(env);
+    const user = users.find(u => u.name.toLowerCase() === query || u.uuid.toLowerCase() === query || u.id === query);
+
+    if (!user) {
+      await sendTelegramWorkerMessage(env, '❌ کاربر یافت نشد.', getTelegramWorkerMainMenuKeyboard(), chatId);
+      return;
+    }
+
+    const usedGB = (user.usedBytes / (1024 * 1024 * 1024)).toFixed(2);
+    const limitGB = user.limitBytes > 0 ? (user.limitBytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB' : 'نامحدود';
+
+    await sendTelegramWorkerMessage(
+      env,
+      `👤 **اطلاعات کاربر ${user.name}:**\n\n` +
+      `📊 **حجم مصرفی:** ${usedGB} / ${limitGB}\n` +
+      `⏳ **تاریخ انقضا:** ${user.expireDate || 'نامحدود'}\n` +
+      `🔑 **UUID:** \`${user.uuid}\`\n\n` +
+      `🔗 **لینک ساب:**\n\`${origin}/sub/${user.uuid}\``,
+      getTelegramWorkerMainMenuKeyboard(),
+      chatId
+    );
+    return;
+  }
 }
 
 // مدیریت VLESS over WebSocket سوکت دایرکت کلودفلر با پینگ سبز واقعی
