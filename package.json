@@ -3,7 +3,9 @@
   "version": "1.0.0",
   "main": "worker.js",
   "scripts": {
-    "build": "echo 'Build complete'",
-    "deploy": "echo 'Deploy complete'"
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^3.0.0"
   }
 }
