@@ -1,7 +1,7 @@
 /**
  * ورکر اختصاصی «دیزاینو وی پی ان» (Dizyno VPN Panel - Cloudflare Workers Edition)
- * شامل VLESS over WebSocket، داشبورد کامل مدیریت، راه‌اندازی اولیه، مودال ساخت کاربر،
- * مودال تنظیمات کامل (تغییر رمز، آی‌پی تمیز، ربات تلگرام) و سیستم سابسکریپشن هوشمند.
+ * شامل VLESS over WebSocket، مدیریت کامل کاربران با پشتیبانی از حروف فارسی در Base64،
+ * راه‌اندازی اولیه، مودال تنظیمات، آی‌پی تمیز و سابسکریپشن هوشمند.
  */
 
 import { connect } from 'cloudflare:sockets';
@@ -16,7 +16,7 @@ const DEFAULT_SETTINGS = {
   telegramAdminId: ''
 };
 
-// حافظه ماندگار جهانی درون‌برنامه
+// حافظه ماندگار درون‌برنامه
 let globalMemoryStore = {
   settings: { ...DEFAULT_SETTINGS },
   users: []
@@ -26,6 +26,20 @@ let globalMemoryStore = {
 function getKvBinding(env) {
   if (!env) return null;
   return env.DIZYNO_KV || env.USERS_KV || env.KV || null;
+}
+
+// تابع تبدیل امن رشته‌های فارسی و UTF-8 به Base64 (جلوگیری از ارور ۵۰۰)
+function safeBase64(str) {
+  try {
+    const bytes = new TextEncoder().encode(str);
+    let binary = '';
+    for (let i = 0; i < bytes.byteLength; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return btoa(binary);
+  } catch (e) {
+    return btoa(unescape(encodeURIComponent(str)));
+  }
 }
 
 // دریافت تنظیمات
@@ -85,189 +99,193 @@ const PRESET_CLEAN_IPS = [
 
 export default {
   async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-    const upgradeHeader = request.headers.get('Upgrade');
+    try {
+      const url = new URL(request.url);
+      const upgradeHeader = request.headers.get('Upgrade');
 
-    // هندل کردن اتصال VLESS over WebSocket
-    if (upgradeHeader && upgradeHeader.toLowerCase() === 'websocket') {
-      return await handleVlessWebSocket(request, env);
-    }
-
-    const path = url.pathname;
-
-    // API بررسی وضعیت راه‌اندازی
-    if (path === '/api/setup-status') {
-      const settings = await getSettings(env);
-      const users = await getUsers(env);
-      const kvBound = !!getKvBinding(env);
-      return jsonResponse({ success: true, isConfigured: !!settings.isConfigured, hasUsers: users.length > 0, kvBound });
-    }
-
-    // API راه‌اندازی اولیه
-    if (path === '/api/setup-initial' && request.method === 'POST') {
-      const body = await request.json();
-      const settings = await getSettings(env);
-
-      if (settings.isConfigured) {
-        return jsonResponse({ success: false, message: 'پنل قبلاً پیکربندی شده است.' }, 400);
+      // هندل کردن اتصال VLESS over WebSocket
+      if (upgradeHeader && upgradeHeader.toLowerCase() === 'websocket') {
+        return await handleVlessWebSocket(request, env);
       }
 
-      if (!body.username || !body.password) {
-        return jsonResponse({ success: false, message: 'نام کاربری و کلمه عبور الزامی است.' }, 400);
+      const path = url.pathname;
+
+      // API بررسی وضعیت راه‌اندازی
+      if (path === '/api/setup-status') {
+        const settings = await getSettings(env);
+        const users = await getUsers(env);
+        const kvBound = !!getKvBinding(env);
+        return jsonResponse({ success: true, isConfigured: !!settings.isConfigured, hasUsers: users.length > 0, kvBound });
       }
 
-      settings.username = body.username.trim();
-      settings.password = body.password.trim();
-      if (body.cleanIp) settings.cleanIp = body.cleanIp.trim();
-      settings.isConfigured = true;
+      // API راه‌اندازی اولیه
+      if (path === '/api/setup-initial' && request.method === 'POST') {
+        const body = await request.json();
+        const settings = await getSettings(env);
 
-      await saveSettings(env, settings);
-      return jsonResponse({ success: true, message: 'راه‌اندازی اولیه انجام شد.' });
-    }
+        if (settings.isConfigured) {
+          return jsonResponse({ success: false, message: 'پنل قبلاً پیکربندی شده است.' }, 400);
+        }
 
-    // API ورود
-    if (path === '/api/login' && request.method === 'POST') {
-      const body = await request.json();
-      const settings = await getSettings(env);
+        if (!body.username || !body.password) {
+          return jsonResponse({ success: false, message: 'نام کاربری و کلمه عبور الزامی است.' }, 400);
+        }
 
-      if (body.username === settings.username && body.password === settings.password) {
-        return jsonResponse({ success: true, message: 'ورود موفقیت‌آمیز بود.' });
-      }
-      return jsonResponse({ success: false, message: 'اطلاعات ورود اشتباه است.' }, 400);
-    }
+        settings.username = body.username.trim();
+        settings.password = body.password.trim();
+        if (body.cleanIp) settings.cleanIp = body.cleanIp.trim();
+        settings.isConfigured = true;
 
-    // API دریافت تنظیمات
-    if (path === '/api/settings') {
-      const settings = await getSettings(env);
-      return jsonResponse({ success: true, settings });
-    }
-
-    // API تغییر تنظیمات
-    if (path === '/api/settings' && request.method === 'POST') {
-      const body = await request.json();
-      const settings = await getSettings(env);
-
-      if (body.username) settings.username = body.username.trim();
-      if (body.password) settings.password = body.password.trim();
-      if (body.cleanIp !== undefined) settings.cleanIp = body.cleanIp.trim();
-      if (body.telegramBotToken !== undefined) settings.telegramBotToken = body.telegramBotToken.trim();
-      if (body.telegramAdminId !== undefined) settings.telegramAdminId = body.telegramAdminId.trim();
-
-      await saveSettings(env, settings);
-      return jsonResponse({ success: true, message: 'تنظیمات با موفقیت به‌روزرسانی شد.' });
-    }
-
-    // API دریافت کاربران
-    if (path === '/api/users' && request.method === 'GET') {
-      const users = await getUsers(env);
-      return jsonResponse({ success: true, users });
-    }
-
-    // API ساخت کاربر
-    if (path === '/api/users' && request.method === 'POST') {
-      const body = await request.json();
-      const users = await getUsers(env);
-
-      if (!body.name || !body.name.trim()) {
-        return jsonResponse({ success: false, message: 'نام کاربر الزامی است.' }, 400);
+        await saveSettings(env, settings);
+        return jsonResponse({ success: true, message: 'راه‌اندازی اولیه انجام شد.' });
       }
 
-      let expireDate = null;
-      if (body.expireDays && parseInt(body.expireDays) > 0) {
-        const d = new Date();
-        d.setDate(d.getDate() + parseInt(body.expireDays));
-        expireDate = d.toISOString().split('T')[0];
+      // API ورود
+      if (path === '/api/login' && request.method === 'POST') {
+        const body = await request.json();
+        const settings = await getSettings(env);
+
+        if (body.username === settings.username && body.password === settings.password) {
+          return jsonResponse({ success: true, message: 'ورود موفقیت‌آمیز بود.' });
+        }
+        return jsonResponse({ success: false, message: 'اطلاعات ورود اشتباه است.' }, 400);
       }
 
-      const newUuid = crypto.randomUUID();
-      const newUser = {
-        id: newUuid,
-        uuid: newUuid,
-        name: body.name.trim(),
-        limitBytes: body.limitGB ? parseFloat(body.limitGB) * 1024 * 1024 * 1024 : 0,
-        usedBytes: 0,
-        expireDate: expireDate,
-        status: 'active',
-        createdAt: new Date().toISOString()
-      };
+      // API دریافت تنظیمات
+      if (path === '/api/settings') {
+        const settings = await getSettings(env);
+        return jsonResponse({ success: true, settings });
+      }
 
-      users.push(newUser);
-      await saveUsers(env, users);
-      return jsonResponse({ success: true, message: 'کاربر جدید با موفقیت ایجاد شد.', user: newUser });
-    }
+      // API تغییر تنظیمات
+      if (path === '/api/settings' && request.method === 'POST') {
+        const body = await request.json();
+        const settings = await getSettings(env);
 
-    // API حذف کاربر
-    if (path.startsWith('/api/users/')) {
-      const parts = path.split('/');
-      const userId = parts[3];
-      const users = await getUsers(env);
-      const index = users.findIndex(u => u.id === userId || u.uuid === userId);
+        if (body.username) settings.username = body.username.trim();
+        if (body.password) settings.password = body.password.trim();
+        if (body.cleanIp !== undefined) settings.cleanIp = body.cleanIp.trim();
+        if (body.telegramBotToken !== undefined) settings.telegramBotToken = body.telegramBotToken.trim();
+        if (body.telegramAdminId !== undefined) settings.telegramAdminId = body.telegramAdminId.trim();
 
-      if (index === -1) return jsonResponse({ success: false, message: 'کاربر یافت نشد.' }, 404);
+        await saveSettings(env, settings);
+        return jsonResponse({ success: true, message: 'تنظیمات با موفقیت به‌روزرسانی شد.' });
+      }
 
-      if (request.method === 'DELETE') {
-        users.splice(index, 1);
+      // API دریافت کاربران
+      if (path === '/api/users' && request.method === 'GET') {
+        const users = await getUsers(env);
+        return jsonResponse({ success: true, users });
+      }
+
+      // API ساخت کاربر
+      if (path === '/api/users' && request.method === 'POST') {
+        const body = await request.json();
+        const users = await getUsers(env);
+
+        if (!body.name || !body.name.trim()) {
+          return jsonResponse({ success: false, message: 'نام کاربر الزامی است.' }, 400);
+        }
+
+        let expireDate = null;
+        if (body.expireDays && parseInt(body.expireDays) > 0) {
+          const d = new Date();
+          d.setDate(d.getDate() + parseInt(body.expireDays));
+          expireDate = d.toISOString().split('T')[0];
+        }
+
+        const newUuid = crypto.randomUUID();
+        const newUser = {
+          id: newUuid,
+          uuid: newUuid,
+          name: body.name.trim(),
+          limitBytes: body.limitGB ? parseFloat(body.limitGB) * 1024 * 1024 * 1024 : 0,
+          usedBytes: 0,
+          expireDate: expireDate,
+          status: 'active',
+          createdAt: new Date().toISOString()
+        };
+
+        users.push(newUser);
         await saveUsers(env, users);
-        return jsonResponse({ success: true, message: 'کاربر حذف شد.' });
-      }
-    }
-
-    // API لیست آی‌پی‌های تمیز
-    if (path === '/api/clean-ips') {
-      const settings = await getSettings(env);
-      return jsonResponse({ success: true, currentCleanIp: settings.cleanIp || '', presetIps: PRESET_CLEAN_IPS });
-    }
-
-    // مسیر سابسکریپشن هوشمند (/sub/:uuid)
-    if (path.includes('/sub/')) {
-      const rawUuid = path.split('/sub/')[1] || '';
-      const cleanUuid = rawUuid.split('/')[0].split('?')[0].trim().toLowerCase();
-
-      const users = await getUsers(env);
-      const user = users.find(u => (u.uuid && u.uuid.toLowerCase() === cleanUuid) || u.id === cleanUuid);
-
-      if (!user) {
-        return new Response('User Not Found / کاربر یافت نشد', { status: 404 });
+        return jsonResponse({ success: true, message: 'کاربر جدید با موفقیت ایجاد شد.', user: newUser });
       }
 
-      const settings = await getSettings(env);
-      const host = url.hostname;
-      const connectAddress = settings.cleanIp && settings.cleanIp.trim() !== '' ? settings.cleanIp.trim() : host;
+      // API حذف کاربر
+      if (path.startsWith('/api/users/')) {
+        const parts = path.split('/');
+        const userId = parts[3];
+        const users = await getUsers(env);
+        const index = users.findIndex(u => u.id === userId || u.uuid === userId);
 
-      const vlessConfig = `vless://${user.uuid}@${connectAddress}:443?type=ws&path=%2Fvless&security=tls&encryption=none&fp=chrome&sni=${host}&host=${host}#${encodeURIComponent(user.name + ' | Dizyno-Cloudflare')}`;
-      const base64Config = btoa(vlessConfig);
+        if (index === -1) return jsonResponse({ success: false, message: 'کاربر یافت نشد.' }, 404);
 
-      const userAgent = (request.headers.get('User-Agent') || '').toLowerCase();
-      const secChUa = request.headers.get('sec-ch-ua');
-      const acceptLang = request.headers.get('accept-language');
-      const isVpnClient = /v2ray|xray|shadowrocket|nekobox|sing-box|clash|stash|quantumult|streisand|passwall|sagernet|surfboard|hiddify|flclash|matsuri|v2fly|go-http-client|axios|fetch|curl|wget/i.test(userAgent);
+        if (request.method === 'DELETE') {
+          users.splice(index, 1);
+          await saveUsers(env, users);
+          return jsonResponse({ success: true, message: 'کاربر حذف شد.' });
+        }
+      }
 
-      const forceHtml = url.searchParams.get('html') === 'true';
-      const forceRaw = url.searchParams.get('raw') === 'true' || url.searchParams.get('format') === 'base64';
+      // API لیست آی‌پی‌های تمیز
+      if (path === '/api/clean-ips') {
+        const settings = await getSettings(env);
+        return jsonResponse({ success: true, currentCleanIp: settings.cleanIp || '', presetIps: PRESET_CLEAN_IPS });
+      }
 
-      const isRealBrowser = (secChUa || acceptLang) && userAgent.includes('mozilla') && !isVpnClient;
+      // مسیر سابسکریپشن هوشمند (/sub/:uuid)
+      if (path.includes('/sub/')) {
+        const rawUuid = path.split('/sub/')[1] || '';
+        const cleanUuid = rawUuid.split('/')[0].split('?')[0].trim().toLowerCase();
 
-      if ((forceHtml || isRealBrowser) && !forceRaw) {
-        return new Response(renderSubHtml(user, url.origin, vlessConfig), {
-          headers: { 'Content-Type': 'text/html; charset=utf-8' }
+        const users = await getUsers(env);
+        const user = users.find(u => (u.uuid && u.uuid.toLowerCase() === cleanUuid) || u.id === cleanUuid);
+
+        if (!user) {
+          return new Response('User Not Found / کاربر یافت نشد', { status: 404 });
+        }
+
+        const settings = await getSettings(env);
+        const host = url.hostname;
+        const connectAddress = settings.cleanIp && settings.cleanIp.trim() !== '' ? settings.cleanIp.trim() : host;
+
+        const vlessConfig = `vless://${user.uuid}@${connectAddress}:443?type=ws&path=%2Fvless&security=tls&encryption=none&fp=chrome&sni=${host}&host=${host}#${encodeURIComponent(user.name + ' | Dizyno-Cloudflare')}`;
+        const base64Config = safeBase64(vlessConfig);
+
+        const userAgent = (request.headers.get('User-Agent') || '').toLowerCase();
+        const secChUa = request.headers.get('sec-ch-ua');
+        const acceptLang = request.headers.get('accept-language');
+        const isVpnClient = /v2ray|xray|shadowrocket|nekobox|sing-box|clash|stash|quantumult|streisand|passwall|sagernet|surfboard|hiddify|flclash|matsuri|v2fly|go-http-client|axios|fetch|curl|wget/i.test(userAgent);
+
+        const forceHtml = url.searchParams.get('html') === 'true';
+        const forceRaw = url.searchParams.get('raw') === 'true' || url.searchParams.get('format') === 'base64';
+
+        const isRealBrowser = (secChUa || acceptLang) && userAgent.includes('mozilla') && !isVpnClient;
+
+        if ((forceHtml || isRealBrowser) && !forceRaw) {
+          return new Response(renderSubHtml(user, url.origin, vlessConfig), {
+            headers: { 'Content-Type': 'text/html; charset=utf-8' }
+          });
+        }
+
+        const expireTimestamp = user.expireDate ? Math.floor(new Date(user.expireDate).getTime() / 1000) : 0;
+        return new Response(base64Config, {
+          headers: {
+            'Content-Type': 'text/plain; charset=utf-8',
+            'Subscription-Userinfo': `upload=0; download=${user.usedBytes}; total=${user.limitBytes || 0}; expire=${expireTimestamp}`,
+            'profile-title': `base64:${safeBase64(user.name)}`,
+            'profile-update-interval': '24'
+          }
         });
       }
 
-      const expireTimestamp = user.expireDate ? Math.floor(new Date(user.expireDate).getTime() / 1000) : 0;
-      return new Response(base64Config, {
-        headers: {
-          'Content-Type': 'text/plain; charset=utf-8',
-          'Subscription-Userinfo': `upload=0; download=${user.usedBytes}; total=${user.limitBytes || 0}; expire=${expireTimestamp}`,
-          'profile-title': `base64:${btoa(user.name)}`,
-          'profile-update-interval': '24'
-        }
+      // رندر داشبورد اصلی مدیریت
+      return new Response(renderDashboardHtml(), {
+        headers: { 'Content-Type': 'text/html; charset=utf-8' }
       });
+    } catch (err) {
+      return new Response('Internal Server Error: ' + err.message, { status: 500 });
     }
-
-    // رندر داشبورد اصلی مدیریت
-    return new Response(renderDashboardHtml(), {
-      headers: { 'Content-Type': 'text/html; charset=utf-8' }
-    });
   }
 };
 
