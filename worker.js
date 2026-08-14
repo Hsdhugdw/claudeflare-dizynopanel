@@ -501,7 +501,7 @@ function renderDashboardHtml() {
 
     <div class="container-fluid px-3 px-md-5">
       <div id="kvWarning" class="alert alert-warning rounded-4 mb-4 d-none">
-        <i class="fa-solid fa-triangle-exclamation me-2"></i> <strong>هشدار دیتابیس KV:</strong> دیتابیس `DIZYNO_KV` متصل نشده است. برای ذخیره دائمی کاربران در کلودفلر، به زبانه Settings -> Variables & Bindings بروید و یک KV Binding به نام `DIZYNO_KV` بسازید.
+        <i class="fa-solid fa-triangle-exclamation me-2"></i> <strong>هشدار دیتابیس KV:</strong> دیتابیس 'DIZYNO_KV' متصل نشده است. برای ذخیره دائمی کاربران در کلودفلر، به زبانه Settings -> Variables & Bindings بروید و یک KV Binding به نام 'DIZYNO_KV' بسازید.
       </div>
 
       <div class="card-dark mb-4">
