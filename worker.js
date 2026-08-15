@@ -355,7 +355,7 @@ function jsonResponse(data, status = 200) {
   });
 }
 
-// ارسال پیام تلگرام در نسخه کلودفلر ورکر
+// ارسال پیام تلگرام در نسخه کلودفلر ورکر با HTML Parse Mode
 async function sendTelegramWorkerMessage(env, text, replyMarkup = null, customChatId = null) {
   const settings = await getSettings(env);
   if (!settings.telegramBotToken) return;
@@ -366,7 +366,7 @@ async function sendTelegramWorkerMessage(env, text, replyMarkup = null, customCh
   const payload = {
     chat_id: chatId,
     text: text,
-    parse_mode: 'Markdown'
+    parse_mode: 'HTML'
   };
 
   if (replyMarkup) {
@@ -391,7 +391,7 @@ function getTelegramWorkerMainMenuKeyboard() {
   };
 }
 
-// پردازش دستورات ورودی تلگرام در نسخه کلودفلر
+// پردازش دستورات ورودی تلگرام در نسخه کلودفلر با پشتیبانی از HTML و شناسه عددی
 async function handleTelegramWorkerUpdate(update, env, origin) {
   if (!update || !update.message || !update.message.text) return;
 
@@ -409,7 +409,7 @@ async function handleTelegramWorkerUpdate(update, env, origin) {
   if (text === '/start' || text === 'منو' || text === 'menu') {
     await sendTelegramWorkerMessage(
       env,
-      `⚡ **به ربات مدیریتی «دیزاینو وی پی ان» (Cloudflare Edition) خوش آمدید!**\n\nلطفاً یکی از گزینه‌های زیر را انتخاب کنید:`,
+      `⚡ <b>به ربات مدیریتی «دیزاینو وی پی ان» (Cloudflare Edition) خوش آمدید!</b>\n\nلطفاً یکی از گزینه‌های زیر را انتخاب کنید:`,
       getTelegramWorkerMainMenuKeyboard(),
       chatId
     );
@@ -429,17 +429,18 @@ async function handleTelegramWorkerUpdate(update, env, origin) {
 
     await sendTelegramWorkerMessage(
       env,
-      `📊 **آمار کلی پنل دیزاینو کلودفلر:**\n\n` +
-      `👥 **کل کاربران:** ${totalUsers} نفر\n` +
-      `✅ **کاربران فعال:** ${activeUsers} نفر\n` +
-      `❌ **کاربران منقضی:** ${expiredUsers} نفر\n` +
-      `🌐 **کل ترافیک مصرفی:** ${usedGB} GB`,
+      `📊 <b>آمار کلی پنل دیزاینو کلودفلر:</b>\n\n` +
+      `👥 <b>کل کاربران:</b> ${totalUsers} نفر\n` +
+      `✅ <b>کاربران فعال:</b> ${activeUsers} نفر\n` +
+      `❌ <b>کاربران منقضی:</b> ${expiredUsers} نفر\n` +
+      `🌐 <b>کل ترافیک مصرفی:</b> ${usedGB} GB`,
       getTelegramWorkerMainMenuKeyboard(),
       chatId
     );
     return;
   }
 
+  // لیست کاربران با شماره‌های عددی سریع /user_1, /user_2
   if (text === '👥 لیست کاربران' || text === '/users') {
     const users = await getUsers(env);
     if (users.length === 0) {
@@ -447,11 +448,17 @@ async function handleTelegramWorkerUpdate(update, env, origin) {
       return;
     }
 
-    let reply = `👥 **لیست کاربران پنل:**\n\n`;
-    users.slice(0, 15).forEach((u, i) => {
+    let reply = `👥 <b>لیست کاربران پنل کلودفلر (${users.length} نفر):</b>\n\n`;
+    users.forEach((u, i) => {
+      const num = i + 1;
       const usedGB = (u.usedBytes / (1024 * 1024 * 1024)).toFixed(2);
-      const limitGB = u.limitBytes > 0 ? (u.limitBytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB' : 'نامحدود';
-      reply += `${i + 1}. 👤 **${u.name}** | 📊 ${usedGB}/${limitGB} | ⏳ ${u.expireDate || 'نامحدود'}\n/sub_${u.uuid}\n\n`;
+      const limitGB = u.limitBytes > 0 ? (u.limitBytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB' : 'نامحدود';
+      let expireText = 'نامحدود';
+      if (u.expireDate) {
+        const diffDays = Math.ceil((new Date(u.expireDate) - new Date()) / (1024 * 60 * 60 * 24));
+        expireText = diffDays > 0 ? `${diffDays} روز باقی` : 'منقضی';
+      }
+      reply += `${num}. 👤 <b>${u.name}</b> | 📊 ${usedGB}/${limitGB} | ⏳ ${expireText}\n👉 دریافت لینک: /user_${num}\n\n`;
     });
 
     await sendTelegramWorkerMessage(env, reply, getTelegramWorkerMainMenuKeyboard(), chatId);
@@ -461,11 +468,11 @@ async function handleTelegramWorkerUpdate(update, env, origin) {
   if (text === '➕ ساخت کاربر جدید' || text === '/create') {
     await sendTelegramWorkerMessage(
       env,
-      `➕ **راهنمای ساخت کاربر جدید:**\n\n` +
-      `لطفاً دستور ساخت را به این فرمت ارسال کنید:\n` +
-      `\`create نام_کاربر حجم_GB روز_اعتبار\`\n\n` +
-      `📌 **مثال ساخت کاربر با ۵۰ گیگ و ۳۰ روز:**\n` +
-      `\`create ali 50 30\``,
+      `➕ <b>راهنمای ساخت کاربر جدید:</b>\n\n` +
+      `لطفاً دستور ساخت را ارسال کنید:\n` +
+      `<code>create نام_کاربر حجم_GB روز_اعتبار</code>\n\n` +
+      `📌 <b>مثال ساخت کاربر با ۵۰ گیگ و ۳۰ روز:</b>\n` +
+      `<code>create ali 50 30</code>`,
       getTelegramWorkerMainMenuKeyboard(),
       chatId
     );
@@ -510,12 +517,12 @@ async function handleTelegramWorkerUpdate(update, env, origin) {
 
     await sendTelegramWorkerMessage(
       env,
-      `✅ **کاربر با موفقیت در کلودفلر ایجاد شد!**\n\n` +
-      `👤 **نام:** ${newUser.name}\n` +
-      `📊 **حجم:** ${limitGB > 0 ? limitGB + ' GB' : 'نامحدود'}\n` +
-      `⏳ **اعتبار:** ${expireDays > 0 ? expireDays + ' روز' : 'نامحدود'}\n\n` +
-      `🔑 **UUID:** \`${newUser.uuid}\`\n\n` +
-      `🔗 **لینک ساب:**\n\`${subUrl}\``,
+      `✅ <b>کاربر با موفقیت در کلودفلر ایجاد شد!</b>\n\n` +
+      `👤 <b>نام:</b> ${newUser.name}\n` +
+      `📊 <b>حجم:</b> ${limitGB > 0 ? limitGB + ' GB' : 'نامحدود'}\n` +
+      `⏳ <b>اعتبار:</b> ${expireDays > 0 ? expireDays + ' روز' : 'نامحدود'}\n\n` +
+      `🔑 <b>UUID:</b> <code>${newUser.uuid}</code>\n\n` +
+      `🔗 <b>لینک سابسکریپشن:</b>\n<code>${subUrl}</code>`,
       getTelegramWorkerMainMenuKeyboard(),
       chatId
     );
