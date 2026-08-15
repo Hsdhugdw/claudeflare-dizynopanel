@@ -1,7 +1,8 @@
 /**
  * ورکر اختصاصی «دیزاینو وی پی ان» (Dizyno VPN Panel - Cloudflare Workers Edition)
- * شامل پشتیبانی از چندین کانفیگ (VLESS-WS و Trojan-WS)، پینگ واقعی سبز (پراکسی سوکت دایرکت)،
- * داشبورد مدیریت شیک، راه‌اندازی اولیه، مودال تنظیمات، آی‌پی تمیز و سابسکریپشن هوشمند.
+ * شامل VLESS over WebSocket، مدیریت کامل کاربران با پینگ سبز،
+ * اتصال اتوماتیک وب‌هوکل تلگرام، محاسبه زنده مصرف و ماندگاری،
+ * و طراحی فوق‌العاده شیک با کنتراست بالا و رفع تم زرد/تیره.
  */
 
 import { connect } from 'cloudflare:sockets';
@@ -29,7 +30,7 @@ function getKvBinding(env) {
   return env.DIZYNO_KV || env.USERS_KV || env.KV || null;
 }
 
-// تابع تبدیل امن رشته‌های فارسی و UTF-8 به Base64 (جلوگیری از ارور ۵۰۰)
+// تابع تبدیل امن رشته‌های فارسی و UTF-8 به Base64
 function safeBase64(str) {
   try {
     const bytes = new TextEncoder().encode(str);
@@ -118,6 +119,24 @@ export default {
         return jsonResponse({ success: true });
       }
 
+      // API ست کردن خودکار وب‌هوک تلگرام
+      if (path === '/api/set-telegram-webhook' && request.method === 'POST') {
+        const settings = await getSettings(env);
+        if (!settings.telegramBotToken) {
+          return jsonResponse({ success: false, message: 'توکن ربات تلگرام وارد نشده است.' }, 400);
+        }
+
+        const webhookUrl = `${url.origin}/api/telegram-webhook`;
+        const res = await fetch(`https://api.telegram.org/bot${settings.telegramBotToken}/setWebhook?url=${encodeURIComponent(webhookUrl)}`);
+        const data = await res.json();
+
+        if (data.ok) {
+          return jsonResponse({ success: true, message: 'وب‌هوک تلگرام با موفقیت متصل گردید!', webhookUrl });
+        } else {
+          return jsonResponse({ success: false, message: 'خطا در ثبت وب‌هوک تلگرام: ' + (data.description || '') }, 400);
+        }
+      }
+
       // API بررسی وضعیت راه‌اندازی
       if (path === '/api/setup-status') {
         const settings = await getSettings(env);
@@ -177,6 +196,15 @@ export default {
         if (body.telegramAdminId !== undefined) settings.telegramAdminId = body.telegramAdminId.trim();
 
         await saveSettings(env, settings);
+
+        // ست کردن خودکار وب‌هوک تلگرام در صورت وجود توکن
+        if (settings.telegramBotToken) {
+          try {
+            const webhookUrl = `${url.origin}/api/telegram-webhook`;
+            await fetch(`https://api.telegram.org/bot${settings.telegramBotToken}/setWebhook?url=${encodeURIComponent(webhookUrl)}`);
+          } catch (e) {}
+        }
+
         return jsonResponse({ success: true, message: 'تنظیمات با موفقیت به‌روزرسانی شد.' });
       }
 
@@ -263,7 +291,6 @@ export default {
           `trojan://${user.uuid}@${connectAddress}:443?type=ws&path=%2Ftrojan&security=tls&fp=chrome&sni=${host}&host=${host}#${encodeURIComponent(user.name + ' | Trojan-WS')}`
         ];
 
-        // اگر آدرس دامنه اصلی متفاوت از آی‌پی تمیز باشد، کانفیگ مستقیم هم اضافه می‌شود
         if (connectAddress !== host) {
           configsList.push(`vless://${user.uuid}@${host}:443?type=ws&path=%2Fvless&security=tls&encryption=none&fp=chrome&sni=${host}&host=${host}#${encodeURIComponent(user.name + ' | VLESS-Direct')}`);
         }
@@ -362,13 +389,11 @@ async function handleTelegramWorkerUpdate(update, env, origin) {
 
   const settings = await getSettings(env);
 
-  // تنها پاسخ به ادمین یا در صورت عدم تنظیم ادمین آی‌دی به همه
   if (settings.telegramAdminId && chatId.toString() !== settings.telegramAdminId.toString()) {
     await sendTelegramWorkerMessage(env, '⛔ دسترسی غیرمجاز. این ربات تنها برای مدیریت سرور تنظیم شده است.', null, chatId);
     return;
   }
 
-  // دستور /start یا منو
   if (text === '/start' || text === 'منو' || text === 'menu') {
     await sendTelegramWorkerMessage(
       env,
@@ -379,7 +404,6 @@ async function handleTelegramWorkerUpdate(update, env, origin) {
     return;
   }
 
-  // آمار سرور
   if (text === '📊 آمار سرور' || text === '/stats') {
     const users = await getUsers(env);
     const today = new Date().toISOString().split('T')[0];
@@ -404,7 +428,6 @@ async function handleTelegramWorkerUpdate(update, env, origin) {
     return;
   }
 
-  // لیست کاربران
   if (text === '👥 لیست کاربران' || text === '/users') {
     const users = await getUsers(env);
     if (users.length === 0) {
@@ -423,7 +446,6 @@ async function handleTelegramWorkerUpdate(update, env, origin) {
     return;
   }
 
-  // راهنمای ساخت کاربر
   if (text === '➕ ساخت کاربر جدید' || text === '/create') {
     await sendTelegramWorkerMessage(
       env,
@@ -438,7 +460,6 @@ async function handleTelegramWorkerUpdate(update, env, origin) {
     return;
   }
 
-  // ساخت کاربر مستقیم
   if (text.startsWith('create ')) {
     const parts = text.split(' ');
     const name = parts[1];
@@ -489,7 +510,6 @@ async function handleTelegramWorkerUpdate(update, env, origin) {
     return;
   }
 
-  // استعلام کاربر
   if (text === '🔍 استعلام کاربر') {
     await sendTelegramWorkerMessage(
       env,
@@ -546,12 +566,11 @@ async function handleVlessWebSocket(request, env) {
       if (!isHeaderParsed) {
         if (buffer.length < 22) return;
 
-        // پارس دقیق پروتکل VLESS و Trojan
         const vlessVersion = buffer[0];
         const optLength = buffer[17];
         let cursor = 18 + optLength;
 
-        const command = buffer[cursor]; // 1 = TCP, 2 = UDP
+        const command = buffer[cursor];
         cursor++;
 
         const port = (buffer[cursor] << 8) | buffer[cursor + 1];
@@ -561,15 +580,15 @@ async function handleVlessWebSocket(request, env) {
         cursor++;
 
         let address = '';
-        if (addressType === 1) { // IPv4
+        if (addressType === 1) {
           address = `${buffer[cursor]}.${buffer[cursor+1]}.${buffer[cursor+2]}.${buffer[cursor+3]}`;
           cursor += 4;
-        } else if (addressType === 2) { // Domain Name
+        } else if (addressType === 2) {
           const domainLen = buffer[cursor];
           cursor++;
           address = new TextDecoder().decode(buffer.subarray(cursor, cursor + domainLen));
           cursor += domainLen;
-        } else if (addressType === 3) { // IPv6
+        } else if (addressType === 3) {
           const ipv6Bytes = buffer.subarray(cursor, cursor + 16);
           address = Array.from(ipv6Bytes).map(b => b.toString(16).padStart(2, '0')).join('').match(/.{1,4}/g).join(':');
           cursor += 16;
@@ -578,11 +597,8 @@ async function handleVlessWebSocket(request, env) {
         if (!address || !port || port <= 0 || port > 65535) return;
 
         isHeaderParsed = true;
-
-        // ارسال پاسخ هدر VLESS به کلاینت
         server.send(new Uint8Array([vlessVersion, 0]));
 
-        // اتصال دایرکت TCP به آدرس و پورت مقصد از طریق شبکه پرسرعت کلودفلر
         remoteSocket = connect({ hostname: address, port });
         const writer = remoteSocket.writable.getWriter();
 
@@ -635,6 +651,12 @@ function renderSubHtml(user, origin, configLinks) {
   const limitGB = user.limitBytes > 0 ? (user.limitBytes / (1024 * 1024 * 1024)).toFixed(2) : 'نامحدود';
   const subUrl = `${origin}/sub/${user.uuid}`;
 
+  let daysRemainingText = 'نامحدود';
+  if (user.expireDate) {
+    const diffDays = Math.ceil((new Date(user.expireDate) - new Date()) / (1024 * 60 * 60 * 24));
+    daysRemainingText = diffDays > 0 ? `${diffDays} روز باقی‌مانده` : 'منقضی شده';
+  }
+
   return `<!DOCTYPE html>
 <html lang="fa" dir="rtl">
 <head>
@@ -645,8 +667,8 @@ function renderSubHtml(user, origin, configLinks) {
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
   <link href="https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/Vazirmatn-font-face.css" rel="stylesheet">
   <style>
-    body { font-family: 'Vazirmatn', sans-serif; background: #090d16; color: #f8fafc; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px; margin: 0; }
-    .card-box { background: rgba(18, 25, 41, 0.92); backdrop-filter: blur(20px); border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 28px; padding: 28px; max-width: 440px; width: 100%; box-shadow: 0 25px 60px rgba(0,0,0,0.6); }
+    body { font-family: 'Vazirmatn', sans-serif; background: #070a13; color: #f8fafc; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px; margin: 0; }
+    .card-box { background: #0f172a; border: 1px solid #334155; border-radius: 28px; padding: 28px; max-width: 450px; width: 100%; box-shadow: 0 25px 60px rgba(0,0,0,0.6); }
     .qr-box { background: #fff; padding: 12px; border-radius: 20px; display: inline-block; box-shadow: 0 10px 25px rgba(0,0,0,0.3); }
     .btn-action { border-radius: 14px; padding: 14px; font-weight: 700; transition: all 0.25s ease; }
     .btn-action:hover { transform: translateY(-2px); }
@@ -661,7 +683,7 @@ function renderSubHtml(user, origin, configLinks) {
         </div>
         <div>
           <h5 class="fw-bold text-white mb-0">${user.name}</h5>
-          <span class="text-muted small">دیزاینو وی پی ان | Cloudflare</span>
+          <span class="text-slate-400 small" style="font-size:0.8rem;">دیزاینو وی پی ان | Cloudflare</span>
         </div>
       </div>
       <span class="badge bg-success rounded-pill px-3 py-2">فعال</span>
@@ -669,12 +691,12 @@ function renderSubHtml(user, origin, configLinks) {
     
     <div class="p-3 bg-dark rounded-4 mb-4 text-start small border border-secondary border-opacity-25">
       <div class="d-flex justify-content-between mb-2">
-        <span class="text-muted">حجم مصرفی:</span>
+        <span class="text-slate-400">حجم مصرفی:</span>
         <strong class="text-info fs-6">${usedGB} GB / ${limitGB} ${limitGB !== 'نامحدود' ? 'GB' : ''}</strong>
       </div>
       <div class="d-flex justify-content-between">
-        <span class="text-muted">تاریخ اعتبار:</span>
-        <strong class="text-warning fs-6">${user.expireDate || 'نامحدود'}</strong>
+        <span class="text-slate-400">اعتبار زمانی:</span>
+        <strong class="text-warning fs-6">${daysRemainingText}</strong>
       </div>
     </div>
 
@@ -695,7 +717,7 @@ function renderSubHtml(user, origin, configLinks) {
 </html>`;
 }
 
-// رندر کامل داشبورد گرافیکی مدیریت با تمام مودال‌ها
+// رندر کامل داشبورد گرافیکی فوق‌العاده با کنتراست بالا
 function renderDashboardHtml() {
   return `<!DOCTYPE html>
 <html lang="fa" dir="rtl" data-theme="dark">
@@ -708,27 +730,87 @@ function renderDashboardHtml() {
   <link href="https://cdn.jsdelivr.net/gh/rastikerdar/vazirmatn@v33.003/Vazirmatn-font-face.css" rel="stylesheet">
   <style>
     :root, [data-theme="dark"] {
-      --bg-primary: #070a13;
-      --bg-card: rgba(18, 25, 41, 0.92);
-      --bg-input: #090d16;
-      --border-color: rgba(255, 255, 255, 0.12);
-      --text-main: #f8fafc;
+      --bg-main: #070a13;
+      --bg-card: #0f172a;
+      --bg-card-header: #1e293b;
+      --bg-input: #1e293b;
+      --border-color: #334155;
+      --text-primary: #f8fafc;
+      --text-secondary: #cbd5e1;
       --text-muted: #94a3b8;
     }
     [data-theme="light"] {
-      --bg-primary: #f1f5f9;
+      --bg-main: #f1f5f9;
       --bg-card: #ffffff;
+      --bg-card-header: #f8fafc;
       --bg-input: #ffffff;
       --border-color: #cbd5e1;
-      --text-main: #0f172a;
-      --text-muted: #475569;
+      --text-primary: #0f172a;
+      --text-secondary: #334155;
+      --text-muted: #64748b;
     }
-    body { font-family: 'Vazirmatn', sans-serif; background: var(--bg-primary); color: var(--text-main); min-height: 100vh; transition: background 0.3s; }
+    body { font-family: 'Vazirmatn', sans-serif; background: var(--bg-main); color: var(--text-primary); min-height: 100vh; transition: all 0.3s ease; }
     .navbar-custom { background: var(--bg-card); border-bottom: 1px solid var(--border-color); padding: 16px 28px; }
-    .card-dark { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 24px; padding: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); }
-    .form-control-dark { background: var(--bg-input); border: 1px solid var(--border-color); color: var(--text-main); border-radius: 14px; padding: 12px 16px; }
-    .form-control-dark:focus { background: var(--bg-input); color: var(--text-main); border-color: #38bdf8; box-shadow: 0 0 0 3px rgba(56,189,248,0.2); }
-    .modal-content-dark { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 24px; color: var(--text-main); }
+    .card-dark { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 24px; padding: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.15); }
+    
+    /* جلوگیری از زرد شدن بک‌گراند Autofill مرورگر */
+    input:-webkit-autofill,
+    input:-webkit-autofill:hover, 
+    input:-webkit-autofill:focus {
+      -webkit-text-fill-color: var(--text-primary) !important;
+      -webkit-box-shadow: 0 0 0px 1000px var(--bg-input) inset !important;
+      transition: background-color 5000s ease-in-out 0s;
+    }
+
+    label.form-label {
+      color: var(--text-secondary) !important;
+      font-weight: 600 !important;
+      font-size: 0.88rem !important;
+      margin-bottom: 6px !important;
+    }
+
+    .form-control-dark {
+      background-color: var(--bg-input) !important;
+      border: 1px solid var(--border-color) !important;
+      color: var(--text-primary) !important;
+      border-radius: 12px !important;
+      padding: 12px 16px !important;
+    }
+
+    .form-control-dark::placeholder {
+      color: var(--text-muted) !important;
+      opacity: 0.8 !important;
+    }
+
+    .form-control-dark:focus {
+      border-color: #38bdf8 !important;
+      box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.2) !important;
+    }
+
+    .modal-content-dark {
+      background-color: var(--bg-card) !important;
+      border: 1px solid var(--border-color) !important;
+      border-radius: 24px !important;
+      color: var(--text-primary) !important;
+    }
+
+    .table-custom {
+      color: var(--text-primary) !important;
+    }
+
+    .table-custom th {
+      background-color: var(--bg-card-header) !important;
+      color: var(--text-secondary) !important;
+      font-weight: 700 !important;
+      padding: 16px 20px !important;
+      border-bottom: 1px solid var(--border-color) !important;
+    }
+
+    .table-custom td {
+      padding: 16px 20px !important;
+      border-bottom: 1px solid var(--border-color) !important;
+      vertical-align: middle !important;
+    }
   </style>
 </head>
 <body>
@@ -739,11 +821,17 @@ function renderDashboardHtml() {
       <div class="bg-primary text-white rounded-4 p-3 d-inline-flex mb-3" style="width:60px; height:60px; align-items:center; justify-content:center;">
         <i class="fa-solid fa-bolt fs-2"></i>
       </div>
-      <h4 class="fw-bold mb-1">راه‌اندازی اولیه پنل دیزاینو</h4>
+      <h4 class="fw-bold mb-1 text-white">راه‌اندازی اولیه پنل دیزاینو</h4>
       <p class="text-muted small mb-4">تعیین نام کاربری و کلمه عبور ادمین برای Cloudflare Workers</p>
       <form id="setupForm">
-        <input type="text" id="setupUsername" class="form-control form-control-dark mb-3" placeholder="نام کاربری ادمین" required>
-        <input type="password" id="setupPassword" class="form-control form-control-dark mb-4" placeholder="کلمه عبور جدید" required>
+        <div class="text-start mb-3">
+          <label class="form-label">نام کاربری ادمین</label>
+          <input type="text" id="setupUsername" class="form-control form-control-dark" placeholder="مثال: admin" required>
+        </div>
+        <div class="text-start mb-4">
+          <label class="form-label">کلمه عبور ادمین</label>
+          <input type="password" id="setupPassword" class="form-control form-control-dark" placeholder="••••••••" required>
+        </div>
         <button type="submit" class="btn btn-primary w-100 py-3 rounded-3 fw-bold fs-6">ثبت و ورود به پنل</button>
       </form>
     </div>
@@ -752,14 +840,20 @@ function renderDashboardHtml() {
   <!-- 2. ورود ادمین -->
   <div id="loginView" class="min-vh-100 d-flex align-items-center justify-content-center p-3 d-none">
     <div class="card-dark text-center" style="max-width: 420px; width: 100%;">
-      <div class="bg-indigo text-white rounded-4 p-3 d-inline-flex mb-3" style="width:60px; height:60px; background:#6366f1; align-items:center; justify-content:center;">
+      <div class="rounded-4 p-3 d-inline-flex mb-3" style="width:60px; height:60px; background:#6366f1; color:white; align-items:center; justify-content:center;">
         <i class="fa-solid fa-lock fs-2"></i>
       </div>
-      <h4 class="fw-bold mb-1">ورود به پنل دیزاینو</h4>
+      <h4 class="fw-bold mb-1 text-white">ورود به پنل دیزاینو</h4>
       <p class="text-muted small mb-4">نسخه اختصاصی Cloudflare Workers</p>
       <form id="loginForm">
-        <input type="text" id="loginUsername" class="form-control form-control-dark mb-3" placeholder="نام کاربری" required>
-        <input type="password" id="loginPassword" class="form-control form-control-dark mb-4" placeholder="کلمه عبور" required>
+        <div class="text-start mb-3">
+          <label class="form-label">نام کاربری</label>
+          <input type="text" id="loginUsername" class="form-control form-control-dark" placeholder="نام کاربری" required>
+        </div>
+        <div class="text-start mb-4">
+          <label class="form-label">کلمه عبور</label>
+          <input type="password" id="loginPassword" class="form-control form-control-dark" placeholder="••••••••" required>
+        </div>
         <button type="submit" class="btn btn-primary w-100 py-3 rounded-3 fw-bold fs-6">ورود به سیستم</button>
       </form>
     </div>
@@ -807,13 +901,13 @@ function renderDashboardHtml() {
         </div>
 
         <div class="table-responsive">
-          <table class="table table-dark table-hover align-middle mb-0">
+          <table class="table table-custom table-hover align-middle mb-0">
             <thead>
-              <tr class="text-muted">
+              <tr>
                 <th>#</th>
                 <th>نام کاربر</th>
-                <th>حجم مصرفی</th>
-                <th>اعتبار (روز)</th>
+                <th>حجم مصرفی (زنده)</th>
+                <th>اعتبار (روز باقی‌مانده)</th>
                 <th>وضعیت</th>
                 <th class="text-center">عملیات</th>
               </tr>
@@ -836,16 +930,16 @@ function renderDashboardHtml() {
         <form id="createUserForm">
           <div class="modal-body">
             <div class="mb-3">
-              <label class="form-label small text-muted">نام کاربر</label>
+              <label class="form-label">نام کاربر</label>
               <input type="text" id="newUserName" class="form-control form-control-dark" placeholder="مثال: ali_user" required>
             </div>
             <div class="mb-3">
-              <label class="form-label small text-muted">حجم مجاز (گیگابایت - GB)</label>
+              <label class="form-label">حجم مجاز (گیگابایت - GB)</label>
               <input type="number" id="newUserLimitGB" class="form-control form-control-dark" placeholder="مثال: 50 (0 یعنی نامحدود)" value="50">
             </div>
             <div class="mb-3">
-              <label class="form-label small text-muted">مدت زمان اعتبار (روز)</label>
-              <input type="number" id="newUserExpireDays" class="form-control form-control-dark" placeholder="مثال: 30" value="30">
+              <label class="form-label">مدت زمان اعتبار (روز)</label>
+              <input type="number" id="newUserExpireDays" class="form-control form-control-dark" placeholder="مثال: 30 (0 یعنی نامحدود)" value="30">
             </div>
           </div>
           <div class="modal-footer border-secondary border-opacity-25">
@@ -868,24 +962,27 @@ function renderDashboardHtml() {
         <form id="settingsForm">
           <div class="modal-body">
             <div class="mb-3">
-              <label class="form-label small text-muted">نام کاربری ادمین</label>
+              <label class="form-label">نام کاربری ادمین</label>
               <input type="text" id="settingsUsername" class="form-control form-control-dark" required>
             </div>
             <div class="mb-3">
-              <label class="form-label small text-muted">کلمه عبور ادمین</label>
+              <label class="form-label">کلمه عبور ادمین</label>
               <input type="password" id="settingsPassword" class="form-control form-control-dark" placeholder="رمز جدید یا قبلی" required>
             </div>
             <div class="mb-3">
-              <label class="form-label small text-muted">آی‌پی یا دامنه تمیز اتصال</label>
+              <label class="form-label">آی‌پی یا دامنه تمیز اتصال</label>
               <input type="text" id="settingsCleanIp" class="form-control form-control-dark" placeholder="مثال: 162.159.192.1">
             </div>
             <div class="mb-3">
-              <label class="form-label small text-muted">توکن ربات تلگرام (BotFather Token)</label>
-              <input type="text" id="settingsBotToken" class="form-control form-control-dark" placeholder="اختیاری">
+              <label class="form-label">توکن ربات تلگرام (BotFather Token)</label>
+              <div class="input-group">
+                <input type="text" id="settingsBotToken" class="form-control form-control-dark" placeholder="مثال: 123456789:ABCdef...">
+                <button type="button" class="btn btn-outline-info px-3" onclick="triggerSetWebhook()">⚡ اتصال وب‌هوک</button>
+              </div>
             </div>
             <div class="mb-3">
-              <label class="form-label small text-muted">Chat ID ادمین در تلگرام</label>
-              <input type="text" id="settingsAdminId" class="form-control form-control-dark" placeholder="اختیاری">
+              <label class="form-label">Chat ID عددی ادمین در تلگرام</label>
+              <input type="text" id="settingsAdminId" class="form-control form-control-dark" placeholder="مثال: 123456789">
             </div>
           </div>
           <div class="modal-footer border-secondary border-opacity-25">
@@ -907,7 +1004,7 @@ function renderDashboardHtml() {
         </div>
         <div class="modal-body">
           <div class="mb-3">
-            <label class="form-label small text-muted">آی‌پی یا دامنه تمیز اختصاصی</label>
+            <label class="form-label">آی‌پی یا دامنه تمیز اختصاصی</label>
             <input type="text" id="cleanIpInput" class="form-control form-control-dark" placeholder="مثال: 162.159.192.1">
           </div>
           <button class="btn btn-info w-100 rounded-3 py-2 fw-bold text-white mb-3" onclick="saveCleanIp()">ذخیره و اعمال روی کانفیگ‌ها</button>
@@ -1001,6 +1098,12 @@ function renderDashboardHtml() {
       }
     });
 
+    async function triggerSetWebhook() {
+      const res = await fetch('/api/set-telegram-webhook', { method: 'POST' });
+      const data = await res.json();
+      alert(data.message);
+    }
+
     async function showDash() {
       document.getElementById('setupView').classList.add('d-none');
       document.getElementById('loginView').classList.add('d-none');
@@ -1036,15 +1139,29 @@ function renderDashboardHtml() {
         const subUrl = location.origin + '/sub/' + u.uuid;
         const htmlSubUrl = subUrl + '?html=true';
         const usedGB = (u.usedBytes/(1024*1024*1024)).toFixed(2);
-        const limitGB = u.limitBytes > 0 ? (u.limitBytes/(1024*1024*1024)).toFixed(2) : 'نامحدود';
+        const limitGB = u.limitBytes > 0 ? (u.limitBytes/(1024*1024*1024)).toFixed(2) + ' GB' : 'نامحدود';
+
+        let expireText = 'نامحدود';
+        if (u.expireDate) {
+          const diffDays = Math.ceil((new Date(u.expireDate) - new Date()) / (1024 * 60 * 60 * 24));
+          expireText = diffDays > 0 ? diffDays + ' روز باقی‌مانده' : 'منقضی شده';
+        }
+
+        let percent = 0;
+        if (u.limitBytes > 0) {
+          percent = Math.min(100, Math.round((u.usedBytes / u.limitBytes) * 100));
+        }
 
         tbody.innerHTML += \`
           <tr>
             <td>\${i+1}</td>
             <td><strong>\${u.name}</strong></td>
-            <td><span class="text-info">\${usedGB} GB</span> / <span class="text-muted">\${limitGB}</span></td>
-            <td>\${u.expireDate || 'نامحدود'}</td>
-            <td><span class="badge bg-success rounded-pill px-3 py-1.5">فعال</span></td>
+            <td>
+              <div><strong class="text-info">\${usedGB} GB</strong> / <span class="text-muted">\${limitGB}</span></div>
+              \${u.limitBytes > 0 ? \`<div class="progress mt-1" style="height: 6px;"><div class="progress-bar bg-info" style="width: \${percent}%"></div></div>\` : ''}
+            </td>
+            <td><strong class="\${expireText === 'منقضی شده' ? 'text-danger' : 'text-warning'}">\${expireText}</strong></td>
+            <td><span class="badge \${expireText === 'منقضی شده' ? 'bg-danger' : 'bg-success'} rounded-pill px-3 py-1.5">\${expireText === 'منقضی شده' ? 'منقضی' : 'فعال'}</span></td>
             <td class="text-center">
               <button class="btn btn-sm btn-outline-primary me-1 rounded-3" onclick="copyText('\${subUrl}', 'لینک ساب کپی شد!')" title="کپی لینک سابسکریپشن"><i class="fa-solid fa-link"></i> کپی ساب</button>
               <button class="btn btn-sm btn-outline-info me-1 rounded-3" onclick="window.open('\${htmlSubUrl}', '_blank')" title="مشاهده صفحه ساب"><i class="fa-solid fa-qrcode"></i> صفحه ساب</button>
