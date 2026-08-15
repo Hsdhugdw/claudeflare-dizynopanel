@@ -1,8 +1,8 @@
 /**
  * ورکر اختصاصی «دیزاینو وی پی ان» (Dizyno VPN Panel - Cloudflare Workers Edition)
- * شامل VLESS over WebSocket، مدیریت کامل کاربران با پینگ سبز،
- * اتصال اتوماتیک وب‌هوکل تلگرام، محاسبه زنده مصرف و ماندگاری،
- * و طراحی فوق‌العاده شیک با کنتراست بالا و رفع تم زرد/تیره.
+ * پشتیبانی کامل از VLESS/Trojan over WebSocket، دیتابیس KV، سابسکریپشن هوشمند،
+ * سیستم ربات تلگرام تعاملی با دکمه اتصال مستقیم وب‌هوک از فرانت‌اند،
+ * بخش اختصاصی تنظیمات تلگرام و کنتراست بالای فوق‌العاده.
  */
 
 import { connect } from 'cloudflare:sockets';
@@ -114,26 +114,39 @@ export default {
 
       // API وب‌هوک ربات تلگرام
       if (path === '/api/telegram-webhook' && request.method === 'POST') {
-        const body = await request.json();
+        const body = await request.json().catch(() => ({}));
         await handleTelegramWorkerUpdate(body, env, url.origin);
         return jsonResponse({ success: true });
       }
 
       // API ست کردن خودکار وب‌هوک تلگرام
       if (path === '/api/set-telegram-webhook' && request.method === 'POST') {
+        const body = await request.json().catch(() => ({}));
         const settings = await getSettings(env);
-        if (!settings.telegramBotToken) {
-          return jsonResponse({ success: false, message: 'توکن ربات تلگرام وارد نشده است.' }, 400);
+        const token = (body.token || settings.telegramBotToken || '').trim();
+        const adminId = (body.adminId || settings.telegramAdminId || '').trim();
+
+        if (!token) {
+          return jsonResponse({ success: false, message: 'لطفاً ابتدا توکن ربات تلگرام (BotFather Token) را وارد کنید.' }, 400);
         }
 
+        // ذخیره فوری توکن و چت آی‌دی در تنظیمات
+        settings.telegramBotToken = token;
+        if (adminId) settings.telegramAdminId = adminId;
+        await saveSettings(env, settings);
+
         const webhookUrl = `${url.origin}/api/telegram-webhook`;
-        const res = await fetch(`https://api.telegram.org/bot${settings.telegramBotToken}/setWebhook?url=${encodeURIComponent(webhookUrl)}`);
+        const res = await fetch(`https://api.telegram.org/bot${token}/setWebhook?url=${encodeURIComponent(webhookUrl)}`);
         const data = await res.json();
 
         if (data.ok) {
-          return jsonResponse({ success: true, message: 'وب‌هوک تلگرام با موفقیت متصل گردید!', webhookUrl });
+          return jsonResponse({
+            success: true,
+            message: `✅ ربات تلگرام با موفقیت به پنل کلودفلر متصل گردید!\n\nآدرس وب‌هوک ثبت‌شده:\n${webhookUrl}`,
+            webhookUrl
+          });
         } else {
-          return jsonResponse({ success: false, message: 'خطا در ثبت وب‌هوک تلگرام: ' + (data.description || '') }, 400);
+          return jsonResponse({ success: false, message: 'خطا در ثبت وب‌هوک تلگرام: ' + (data.description || 'توکن نامعتبر است') }, 400);
         }
       }
 
@@ -285,7 +298,6 @@ export default {
         const host = url.hostname;
         const connectAddress = settings.cleanIp && settings.cleanIp.trim() !== '' ? settings.cleanIp.trim() : host;
 
-        // ساخت لیست متنوع کانفیگ‌های VLESS و Trojan
         const configsList = [
           `vless://${user.uuid}@${connectAddress}:443?type=ws&path=%2Fvless&security=tls&encryption=none&fp=chrome&sni=${host}&host=${host}#${encodeURIComponent(user.name + ' | VLESS-WS')}`,
           `trojan://${user.uuid}@${connectAddress}:443?type=ws&path=%2Ftrojan&security=tls&fp=chrome&sni=${host}&host=${host}#${encodeURIComponent(user.name + ' | Trojan-WS')}`
@@ -717,7 +729,7 @@ function renderSubHtml(user, origin, configLinks) {
 </html>`;
 }
 
-// رندر کامل داشبورد گرافیکی فوق‌العاده با کنتراست بالا
+// رندر کامل داشبورد گرافیکی فوق‌العاده با کادر شفاف و شیک ربات تلگرام
 function renderDashboardHtml() {
   return `<!DOCTYPE html>
 <html lang="fa" dir="rtl" data-theme="dark">
@@ -753,7 +765,6 @@ function renderDashboardHtml() {
     .navbar-custom { background: var(--bg-card); border-bottom: 1px solid var(--border-color); padding: 16px 28px; }
     .card-dark { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 24px; padding: 24px; box-shadow: 0 10px 30px rgba(0,0,0,0.15); }
     
-    /* جلوگیری از زرد شدن بک‌گراند Autofill مرورگر */
     input:-webkit-autofill,
     input:-webkit-autofill:hover, 
     input:-webkit-autofill:focus {
@@ -792,6 +803,13 @@ function renderDashboardHtml() {
       border: 1px solid var(--border-color) !important;
       border-radius: 24px !important;
       color: var(--text-primary) !important;
+    }
+
+    .telegram-box {
+      background: rgba(56, 189, 248, 0.05);
+      border: 1px solid rgba(56, 189, 248, 0.25);
+      border-radius: 18px;
+      padding: 18px;
     }
 
     .table-custom {
@@ -951,43 +969,61 @@ function renderDashboardHtml() {
     </div>
   </div>
 
-  <!-- مودال تنظیمات کامل سیستم -->
+  <!-- مودال تنظیمات کامل سیستم همراه با کادر اختصاصی ربات تلگرام -->
   <div class="modal fade" id="settingsModal" tabindex="-1">
-    <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-dialog modal-dialog-centered modal-lg">
       <div class="modal-content modal-content-dark">
         <div class="modal-header border-secondary border-opacity-25">
-          <h5 class="modal-title fw-bold"><i class="fa-solid fa-gear text-warning me-2"></i> تنظیمات سیستم</h5>
+          <h5 class="modal-title fw-bold"><i class="fa-solid fa-gear text-warning me-2"></i> تنظیمات کامل سیستم و ربات</h5>
           <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
         </div>
         <form id="settingsForm">
-          <div class="modal-body">
-            <div class="mb-3">
-              <label class="form-label">نام کاربری ادمین</label>
-              <input type="text" id="settingsUsername" class="form-control form-control-dark" required>
-            </div>
-            <div class="mb-3">
-              <label class="form-label">کلمه عبور ادمین</label>
-              <input type="password" id="settingsPassword" class="form-control form-control-dark" placeholder="رمز جدید یا قبلی" required>
-            </div>
-            <div class="mb-3">
-              <label class="form-label">آی‌پی یا دامنه تمیز اتصال</label>
-              <input type="text" id="settingsCleanIp" class="form-control form-control-dark" placeholder="مثال: 162.159.192.1">
-            </div>
-            <div class="mb-3">
-              <label class="form-label">توکن ربات تلگرام (BotFather Token)</label>
-              <div class="input-group">
-                <input type="text" id="settingsBotToken" class="form-control form-control-dark" placeholder="مثال: 123456789:ABCdef...">
-                <button type="button" class="btn btn-outline-info px-3" onclick="triggerSetWebhook()">⚡ اتصال وب‌هوک</button>
+          <div class="modal-body p-4">
+            <h6 class="fw-bold text-white mb-3"><i class="fa-solid fa-shield-halved text-primary me-2"></i> اطلاعات ادمین و شبکه</h6>
+            <div class="row g-3 mb-4">
+              <div class="col-md-6">
+                <label class="form-label">نام کاربری ادمین</label>
+                <input type="text" id="settingsUsername" class="form-control form-control-dark" required>
+              </div>
+              <div class="col-md-6">
+                <label class="form-label">کلمه عبور ادمین</label>
+                <input type="password" id="settingsPassword" class="form-control form-control-dark" placeholder="رمز جدید یا قبلی" required>
+              </div>
+              <div class="col-12">
+                <label class="form-label">آی‌پی یا دامنه تمیز اتصال</label>
+                <input type="text" id="settingsCleanIp" class="form-control form-control-dark" placeholder="مثال: 162.159.192.1">
               </div>
             </div>
-            <div class="mb-3">
-              <label class="form-label">Chat ID عددی ادمین در تلگرام</label>
-              <input type="text" id="settingsAdminId" class="form-control form-control-dark" placeholder="مثال: 123456789">
+
+            <!-- کادر شیک و برجسته اختصاصی تنظیمات ربات تلگرام -->
+            <div class="telegram-box">
+              <div class="d-flex align-items-center justify-content-between mb-3">
+                <h6 class="fw-bold text-info mb-0 d-flex align-items-center gap-2">
+                  <i class="fa-brands fa-telegram fs-4"></i> مدیریت و ربات تعاملی تلگرام
+                </h6>
+                <span class="badge bg-info text-dark rounded-pill px-3 py-1 fw-bold">نسخه هوشمند</span>
+              </div>
+              <p class="text-muted small mb-3">با ثبت توکن و اتصال وب‌هوک، ربات تلگرام فوراً پیام‌های /start و منوی مدیریت سرور را فعال می‌کند.</p>
+
+              <div class="mb-3">
+                <label class="form-label">توکن ربات (BotFather Token)</label>
+                <div class="input-group">
+                  <input type="text" id="settingsBotToken" class="form-control form-control-dark" placeholder="مثال: 123456789:ABCdefGHI...">
+                  <button type="button" class="btn btn-info text-white px-3 fw-bold" onclick="triggerSetWebhook()">
+                    ⚡ اتصال و ثبت وب‌هوک
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label class="form-label">Chat ID عددی ادمین در تلگرام</label>
+                <input type="text" id="settingsAdminId" class="form-control form-control-dark" placeholder="مثال: 8650344689">
+              </div>
             </div>
           </div>
           <div class="modal-footer border-secondary border-opacity-25">
             <button type="button" class="btn btn-outline-secondary rounded-3" data-bs-dismiss="modal">انصراف</button>
-            <button type="submit" class="btn btn-primary rounded-3 px-4 fw-bold">ذخیره تنظیمات</button>
+            <button type="submit" class="btn btn-primary rounded-3 px-4 fw-bold">ذخیره تمام تنظیمات</button>
           </div>
         </form>
       </div>
@@ -1099,7 +1135,19 @@ function renderDashboardHtml() {
     });
 
     async function triggerSetWebhook() {
-      const res = await fetch('/api/set-telegram-webhook', { method: 'POST' });
+      const token = document.getElementById('settingsBotToken').value.trim();
+      const adminId = document.getElementById('settingsAdminId').value.trim();
+
+      if (!token) {
+        alert('لطفاً توکن ربات تلگرام را در کادر مربوطه وارد کنید.');
+        return;
+      }
+
+      const res = await fetch('/api/set-telegram-webhook', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, adminId })
+      });
       const data = await res.json();
       alert(data.message);
     }
